@@ -140,6 +140,7 @@ class XdgMoEConfig(PretrainedConfig):
         moe_gating_fp32=False,
         routed_scaling_factor=1.0,
         head_dim=128,
+        router_expert_score_correction_coeff=0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -177,6 +178,7 @@ class XdgMoEConfig(PretrainedConfig):
         self.moe_gating_fp32 = moe_gating_fp32
         self.routed_scaling_factor = routed_scaling_factor
         self.head_dim = head_dim
+        self.router_expert_score_correction_coeff = router_expert_score_correction_coeff
 
         super().__init__(
             pad_token_id=pad_token_id,

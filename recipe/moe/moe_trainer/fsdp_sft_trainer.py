@@ -43,7 +43,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.dataset import SFTDataset as OriginSFTDataset
-from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset as OriginMultiTurnSFTDataset
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
@@ -83,6 +83,36 @@ def extract_step(path):
     if match:
         return int(match.group(1))
     return None
+
+class MultiTurnSFTDataset(OriginMultiTurnSFTDataset):
+    def _read_files_and_process(self):
+        def series_to_item(ls):
+            import numpy
+            import pandas
+
+            while isinstance(ls, (pandas.core.series.Series, numpy.ndarray)) and len(ls) == 1:
+                ls = ls[0]
+            return ls
+        # if os.getenv("DEBUG", None) != None:
+        #     if torch.distributed.is_initialized():
+        #         if torch.distributed.get_rank() == 0:
+        #             breakpoint()
+        #     else:
+        #         torch.distributed.barrier()
+        dataframes = []
+        for parquet_file in self.parquet_files:
+            if parquet_file.endswith('parquet'):
+                dataframe = pd.read_parquet(parquet_file)
+            elif parquet_file.endswith('json'):
+                dataframe = pd.read_json(parquet_file)
+            else:
+                raise
+            dataframes.append(dataframe)
+        self.dataframe = pd.concat(dataframes)
+        # if os.getenv("DEBUG", None) != None and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:    
+        #     torch.distributed.barrier()
+        # Extract messages list from dataframe
+        self.messages = self.dataframe[self.messages_key].apply(series_to_item).tolist()
 
 class SFTDataset(OriginSFTDataset):
     def _read_files_and_tokenize(self):
@@ -138,6 +168,7 @@ class FSDPSFTTrainer:
         if self.device_mesh.get_rank() == 0:
             print(self.config)
         self.device_name = get_device_name()
+        # torch.autograd.set_detect_anomaly(True)
 
     def _normalize_config_bsz(self):
         dp_size = self.device_mesh.size(0) if not self.ulysses_device_mesh else self.ulysses_device_mesh.size(0)
@@ -354,12 +385,7 @@ class FSDPSFTTrainer:
                 labels = input_ids[:, 1:].contiguous()
                 output = self.fsdp_model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
                 logits = output.logits
-                if os.getenv("DEBUG", None) != None:
-                    if torch.distributed.is_initialized():
-                        if torch.distributed.get_rank() == 0:
-                            breakpoint()
-                    else:
-                        torch.distributed.barrier()
+                
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels.contiguous()
                 # Flatten the tokens
@@ -422,8 +448,7 @@ class FSDPSFTTrainer:
                 dp_size = 1
 
             loss = torch.sum(loss) / (valid_token_this_rank + 1e-8) * dp_size
-            if os.getenv("DEBUG", None) != None and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:    
-                torch.distributed.barrier()
+            
             if do_backward:
                 loss.backward()
             return loss

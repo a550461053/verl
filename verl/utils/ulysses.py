@@ -316,3 +316,20 @@ def ulysses_pad_and_slice_inputs(input_ids_rmpad: torch.Tensor, position_ids_rmp
 def validate_ulysses_config(num_heads, ulysses_sequence_size):
     if ulysses_sequence_size > 1:
         assert num_heads % ulysses_sequence_size == 0, f"num_heads ({num_heads}) must be divisible by ulysses sequence size({ulysses_sequence_size})"
+
+
+def gather_position_ids_seq_dim(position_ids: torch.Tensor, group: Optional[dist.ProcessGroup] = None):
+    """
+    Gather position_ids across seq-dimension from all sequence parallel ranks.
+
+    Assumes position_ids shape: [bsz, seq_chunk_per_rank]
+    Returns: [bsz, full_seq_len]
+    """
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    if not group:
+        return position_ids
+
+    world_size = dist.get_world_size(group)
+    gathered_list = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered_list, position_ids.cpu(), group=group)
+    return torch.cat([t.to(position_ids.device) for t in gathered_list], dim=1)

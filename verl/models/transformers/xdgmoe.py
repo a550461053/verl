@@ -49,7 +49,7 @@ def ulysses_flash_attn_forward(
     output_attentions: bool = False,
     **kwargs,
 ) -> Tuple[torch.Tensor, None, None]:
-    print('========monkey patch========')
+    # print('========monkey patch========')
     from moe_trainer.modeling_xdgmoe import repeat_kv, apply_rotary_pos_emb
 
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
