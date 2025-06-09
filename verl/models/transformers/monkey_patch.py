@@ -224,7 +224,23 @@ def apply_monkey_patch(
             print("Not support fused kernels for KimiVL")
 
         return
+    elif model.config.model_type == "xdgmoe":
+        module = sys.modules[model.__class__.__module__]
+        real_cls = getattr(module, "XdgMoEFlashAttention2")
 
+        if use_remove_padding or ulysses_sp_size > 1:
+            from verl.models.transformers.xdgmoe import ulysses_flash_attn_forward
+
+            real_cls.forward = ulysses_flash_attn_forward
+            print("Monkey patch FlashAttention2.forward in XdgMoE")
+
+        if use_fused_kernels:
+            # TODO
+            pass 
+            # from verl.models.transformers.qwen2_vl import forward_for_ppo
+            # XdgMoEForCausalLM.forward = forward_for_ppo
+
+        return 
     # transformers<=4.47.1
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):
