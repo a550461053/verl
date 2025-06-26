@@ -18,22 +18,67 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 import hydra
 import ray
 
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+import pandas as pd
+from .grpo_ray_trainer import RayGRPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
+from torch.utils.data import Dataset
+from verl.utils.dataset.rl_dataset import RLHFDataset as OriginalRLHFDataset
 
+
+class RLHFDataset(OriginalRLHFDataset):
+    def _read_files_and_tokenize(self):
+        dataframes = []
+        for parquet_file in self.data_files:
+            # read parquet files and cache
+            if parquet_file.endswith('parquet'):
+                dataframe = pd.read_parquet(parquet_file)
+            elif parquet_file.endswith('json'):
+                dataframe = pd.read_json(parquet_file)
+            elif parquet_file.endswith('jsonl'):
+                chunks = []
+                for chunk in pd.read_json(
+                    parquet_file,
+                    lines=True,
+                    chunksize=10000,
+                ):
+                    chunks.append(chunk)
+
+                dataframe = pd.concat(chunks, ignore_index=True)
+            else:
+                raise
+            dataframes.append(dataframe)
+        self.dataframe = pd.concat(dataframes)
+
+        print(f"dataset len: {len(self.dataframe)}")
+
+        if self.config.data.get('system_prompt', None) is not None:
+            system_prompt = self.config.data.system_prompt
+            self.dataframe[self.prompt_key] = self.dataframe[self.prompt_key].apply(
+                lambda x: [{'role': 'system', 'content': system_prompt}]+x
+            )
+        # filter out too long prompts
+        if self.filter_overlong_prompts:
+            tokenizer = self.tokenizer
+            prompt_key = self.prompt_key
+            self.dataframe = self.dataframe.filter(
+                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                num_proc=self.num_workers,
+                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+            )
+
+            print(f"filter dataset len: {len(self.dataframe)}")
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
-    run_ppo(config)
+    run_grpo(config)
 
 
-def run_ppo(config) -> None:
+def run_grpo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
             runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
             num_cpus=config.ray_init.num_cpus,
-            # local_mode=True,
         )
 
     runner = TaskRunner.remote()
@@ -171,9 +216,6 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     Returns:
         dataset (Dataset): The dataset.
     """
-    from torch.utils.data import Dataset
-
-    from verl.utils.dataset.rl_dataset import RLHFDataset
 
     if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         from verl.utils.import_utils import load_extern_type

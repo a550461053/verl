@@ -17,7 +17,7 @@
 # use mcore transformer config to initialize the model
 from abc import ABC, abstractmethod
 
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 from .config_converter import PretrainedConfig, TransformerConfig
@@ -177,6 +177,7 @@ class DeepseekV3Model(BaseModelInitializer):
             self.tfconfig.moe_router_load_balancing_type = "none"
         # MTP
         if self.tfconfig.mtp_num_layers is not None:
+            from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
             transformer_layer_spec = self.get_transformer_layer_spec()
             mtp_block_spec = get_gpt_mtp_block_spec(self.tfconfig, transformer_layer_spec, use_transformer_engine=True)
             kwargs["mtp_block_spec"] = mtp_block_spec
@@ -194,3 +195,53 @@ class Qwen25VLModel(BaseModelInitializer):
 
     def get_transformer_layer_spec(self):
         raise NotImplementedError("VLM is not supported yet")
+
+
+class XdgMoEModel(BaseModelInitializer):
+    """Initializer for XDG MoE models."""
+
+    def get_transformer_layer_spec(self):
+        from cybertron.models.deepseek_v2.layer_specs_deepseekv2 import get_gpt_layer_with_transformer_engine_spec
+        transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+            self.tfconfig.num_moe_experts,
+            self.tfconfig.moe_grouped_gemm,
+            qk_layernorm=self.tfconfig.qk_layernorm,
+            multi_latent_attention=self.tfconfig.multi_latent_attention
+        )
+        return transformer_layer_spec
+    
+    def initialize(
+        self,
+        pre_process: bool = True,
+        post_process: bool = True,
+        share_embeddings_and_output_weights: bool = False,
+        value: bool = False,
+        **extra_kwargs,
+    ):
+        freeze_moe_router = extra_kwargs.get("freeze_moe_router", True)
+        if freeze_moe_router:
+            self.tfconfig.moe_router_load_balancing_type = "none"
+        
+        transformer_layer_spec = self.get_transformer_layer_spec()
+        model = GPTModel(
+            config=self.tfconfig,
+            transformer_layer_spec=transformer_layer_spec,
+            vocab_size=self.hf_config.vocab_size,
+            max_sequence_length=self.hf_config.max_position_embeddings,
+            pre_process=pre_process,
+            post_process=post_process,
+            share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+            position_embedding_type="rope",
+            rotary_base=self.hf_config.rope_theta,
+        )
+
+        if post_process and value:
+            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+
+            model.output_layer = LinearForLastLayer(input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig)
+
+        if freeze_moe_router:
+            for layer in model.decoder.layers:
+                if hasattr(layer.mlp, "router"):
+                    layer.mlp.router.weight.requires_grad = False
+        return model

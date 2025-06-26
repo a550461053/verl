@@ -368,7 +368,6 @@ class RayPPOTrainer:
         device_name="cuda",
     ):
         """Initialize distributed PPO trainer with Ray backend."""
-
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
@@ -981,7 +980,6 @@ class RayPPOTrainer:
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
-
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}

@@ -31,7 +31,7 @@ import pandas as pd
 import hydra
 import torch
 import torch.distributed
-from peft import LoraConfig, TaskType, get_peft_model
+# from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch import nn, optim
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -76,6 +76,76 @@ elif is_npu_available:
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+
+
+def _zero_next_index(self):
+    return [0]
+
+
+# torch.utils.data.dataloader._BaseDataLoaderIter._next_index = _zero_next_index
+
+
+from megatron.core.datasets.blended_megatron_dataset_builder import (
+    BlendedMegatronDatasetBuilder,
+)
+from cybertron.data.datasets.gpt_dataset_ext import GPTDatasetExt
+from cybertron.data.datasets.gpt_dataset_ext import GPTDatasetExtConfig
+
+# from megatron.core.datasets.utils import get_blend_from_list
+
+from cybertron.tokenizer.tokenizer import HFTokenizer
+
+
+def build_dataset(tokenizer_path):
+
+    class HFGPTDataset(GPTDatasetExt):
+
+        def __getitem__(self, idx):
+            item = super().__getitem__(idx)
+            item["input_ids"] = item.pop("tokens")
+            return item
+
+    def build_gptdataset_config(tokenizer):
+        config_args = dict(
+            accurate_attn_mask_with_cp=False,
+            blend=None,
+            blend_per_split=[
+                (
+                    [
+                        "/cpfs/user/shimo/DATA/sft_data_pro/2_multi_session_megatron/qwen2_xdg_8k_sys_v7.2.1_stage1_v2.2_stage2_dev0.7_multi_session_prompt_document"
+                    ],
+                    [1.0],
+                ),
+                (["/cpfs/data/text_data/submit_v0/pile_test"], [1.0]),
+                (["/cpfs/data/text_data/submit_v0/pile_test"], [1.0]),
+            ],
+            create_attention_mask=False,
+            enable_length_upsample=False,
+            ensure_full_document=True,
+            eod_mask_loss=True,
+            length_upsample_data_root="/cpfs/user/guangsu/verl-debug/run_cybertron/save/length_upsample_data",
+            length_upsample_min_bucket_docs=1000,
+            length_upsample_times='{\\"0-32768\\":1,\\"32768-inf\\":5}',
+            mask_loss_id=160000,
+            mmap_bin_files=True,
+            padding_sequence_to_mul=1,
+            path_to_cache="/cpfs/user/guangsu/verl-debug/run_cybertron/save/moe_sft_145b_v7.2.1_stage1_v2.2_stage2_dev0.7_guangsu/data_cache",
+            random_seed=1234,
+            reset_attention_mask=False,
+            reset_position_ids=False,
+            sequence_length=8192,
+            split=None,
+            tokenizer=tokenizer,
+        )
+        return GPTDatasetExtConfig(**config_args)
+
+    tokenizer = HFTokenizer(tokenizer_path)
+    config = build_gptdataset_config(tokenizer)
+    HFGPTDataset.__name__ = "GPTDatasetExt"
+    dataset = BlendedMegatronDatasetBuilder(
+        HFGPTDataset, (8, 8000, 8000), lambda: True, config
+    ).build()[0]
+    return dataset
 
 
 def extract_step(path):
@@ -285,7 +355,11 @@ class FSDPSFTTrainer:
 
         log_gpu_memory_usage("After model allocation", logger=logger)
 
-        mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+        mixed_precision = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        )
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             self.model,
@@ -322,6 +396,18 @@ class FSDPSFTTrainer:
                 device_mesh=self.device_mesh,
                 forward_prefetch=False,
             )
+
+            # print(self.fsdp_model)
+            # from .dump import hook_fwd_bwd_to_module
+
+            # names = "_fsdp_wrapped_module.lm_head"
+            names = ["_fsdp_wrapped_module.model.layers.0.*"]
+            # hook_fwd_bwd_to_module(
+            #     self.fsdp_model,
+            #     names=names,
+            #     prefix="/cpfs/user/guangsu/verl-debug/dump_data/verl/",
+            #     is_hf=True,
+            # )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32,
@@ -374,6 +460,7 @@ class FSDPSFTTrainer:
         input_ids = batch["input_ids"].to(self.device_name)
         attention_mask = batch["attention_mask"].to(self.device_name)
         position_ids = batch["position_ids"].to(self.device_name)
+        # labels = batch["labels"].to(self.device_name)
         loss_mask = batch.pop("loss_mask")[:, :-1].reshape(-1).to(self.device_name)
         loss_fct = nn.CrossEntropyLoss(reduction="none")
 
@@ -388,12 +475,18 @@ class FSDPSFTTrainer:
                 
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels.contiguous()
+                # shift_logits = logits.contiguous()
+                # shift_labels = labels.contiguous()
                 # Flatten the tokens
                 shift_logits = shift_logits.view(-1, self.model.config.vocab_size)
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
                 loss = loss_fct(shift_logits, shift_labels)
+                
+                # if torch.distributed.get_rank() == 0:
+                #     torch.save(loss, "/cpfs/user/guangsu/verl-debug/dump_data/verl/losses.pt")
+                
                 loss = loss * loss_mask.to(loss.device)
             else:
                 # IMPORTANT: We have a big assumption here, so we can shard the SAME sequence across SP ranks
@@ -587,7 +680,7 @@ class FSDPSFTTrainer:
                 self.train_dataloader,
                 total=self.steps_per_epoch,
                 desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
-                disable=rank != 0
+                disable=rank != 0,
             ):
                 global_step += 1
                 data = TensorDict(data, batch_size=self.config.data.train_batch_size).to(self.device_name)
@@ -600,7 +693,10 @@ class FSDPSFTTrainer:
                 is_save_step = global_step % self.config.trainer.save_freq == 0
 
                 # early exit or validation step
-                if is_last_step or (self.config.trainer.test_freq > 0 and is_valid_step):
+                # if is_last_step or (
+                #     self.config.trainer.test_freq > 0 and is_valid_step
+                # ):
+                if False:
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
@@ -636,6 +732,7 @@ def run_sft(config):
     local_model_path = copy_to_local(src=config.model.partial_pretrain, verbose=True)
     tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
     train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer)
+    # train_dataset = build_dataset(tokenizer_path=local_model_path)
     val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer)
 
     trainer = FSDPSFTTrainer(config=config, device_mesh=device_mesh, ulysses_device_mesh=ulysses_device_mesh, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=val_dataset)

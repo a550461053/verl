@@ -32,6 +32,7 @@ from .config_converter import (
     hf_to_mcore_config_qwen2_5_vl,
     hf_to_mcore_config_qwen2moe,
     hf_to_mcore_config_qwen3moe,
+    hf_to_mcore_config_xdgmoe,
 )
 from .model_forward import (
     gptmodel_forward,
@@ -44,6 +45,7 @@ from .model_initializer import (
     Qwen2MoEModel,
     Qwen3MoEModel,
     Qwen25VLModel,
+    XdgMoEModel
 )
 from .weight_converter import (
     McoreToHFWeightConverterDense,
@@ -51,6 +53,7 @@ from .weight_converter import (
     McoreToHFWeightConverterMixtral,
     McoreToHFWeightConverterQwen2Moe,
     McoreToHFWeightConverterQwen3Moe,
+    McoreToHFWeightConverterXdgMoE,
 )
 
 
@@ -64,6 +67,7 @@ class SupportedModel(Enum):
     LLAMA4 = "Llama4ForConditionalGeneration"  # not tested
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # not tested
+    XdgMoE = "XdgMoEForCausalLM"
 
 
 # Registry for model configuration converters
@@ -77,6 +81,7 @@ MODEL_CONFIG_CONVERTER_REGISTRY: Dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.LLAMA4: hf_to_mcore_config_llama4,
     SupportedModel.QWEN3: hf_to_mcore_config_dense,
     SupportedModel.QWEN3_MOE: hf_to_mcore_config_qwen3moe,
+    SupportedModel.XdgMoE: hf_to_mcore_config_xdgmoe,
 }
 
 # Registry for model initializers
@@ -90,6 +95,7 @@ MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
     SupportedModel.LLAMA4: DenseModel,
     SupportedModel.QWEN3: DenseModel,
     SupportedModel.QWEN3_MOE: Qwen3MoEModel,
+    SupportedModel.XdgMoE: XdgMoEModel,
 }
 
 # Registry for model forward functions
@@ -104,6 +110,7 @@ MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
     SupportedModel.QWEN3: gptmodel_forward,
     SupportedModel.QWEN3_MOE: gptmodel_forward,
     SupportedModel.DEEPSEEK_V3: gptmodel_forward,
+    SupportedModel.XdgMoE: gptmodel_forward,
 }
 
 # Registry for model weight converters
@@ -115,6 +122,7 @@ MODEL_WEIGHT_CONVERTER_REGISTRY: Dict[SupportedModel, Type] = {
     SupportedModel.DEEPSEEK_V3: McoreToHFWeightConverterDpskv3,
     SupportedModel.QWEN3: McoreToHFWeightConverterDense,
     SupportedModel.QWEN3_MOE: McoreToHFWeightConverterQwen3Moe,
+    SupportedModel.XdgMoE: McoreToHFWeightConverterXdgMoE,
 }
 
 

@@ -65,7 +65,15 @@ class MegatronWorker(Worker):
             self.tokenizer = tokenizer_or_path
 
         # Step 2: get the hf
-        hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+        import time
+        success = False
+        while not success:
+            try:
+                hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
+                success = True
+            except Exception as e:
+                print(f"Error loading config: {e}")
+                time.sleep(1)
 
         # Step 3: override the hf config
         override_config_kwargs = {

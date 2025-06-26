@@ -64,6 +64,7 @@ class MegatronPPOActor(BasePPOActor):
         tf_config,
         actor_module: nn.ModuleList,
         actor_optimizer: DistributedOptimizer,
+        tokenizer,
     ):
         """MeagtronPPOActor class. This class implements the simple PPO logics when the model is built with Megatron.
 
@@ -132,6 +133,7 @@ class MegatronPPOActor(BasePPOActor):
                 "reduce_grads_use_alltoall": False,
             }
         )
+        self.tokenizer = tokenizer
 
         config = get_model_config(self.actor_module[0])
         print(config)
@@ -419,6 +421,62 @@ class MegatronPPOActor(BasePPOActor):
                 log_probs = vocab_parallel_log_probs_from_logits(logits, label)
                 log_probs = log_probs.masked_fill(~label_mask, 0.0)
                 ret["log_probs"] = log_probs
+                
+                # # Add token output - get predicted tokens from logits
+                # predicted_tokens = torch.argmax(logits, dim=-1)
+                
+                # # Convert predicted tokens to text with label_mask filtering
+                # batch_size, seq_len = predicted_tokens.shape
+                # predicted_texts = []
+                # label_texts = []
+                
+                # for i in range(batch_size):
+                #     # Get mask for this batch item
+                #     mask = label_mask[i].cpu()
+                    
+                #     # Process predicted tokens
+                #     valid_predicted_tokens = predicted_tokens[i][mask].cpu().tolist()
+                #     if len(valid_predicted_tokens) == 0:
+                #         predicted_texts.append("")
+                #     else:
+                #         try:
+                #             # Decode the valid predicted token IDs to text
+                #             text = self.tokenizer.decode(valid_predicted_tokens, skip_special_tokens=True)
+                #             predicted_texts.append(text)
+                #         except Exception as e:
+                #             # Fallback to token-by-token decoding if batch decode fails
+                #             token_texts = []
+                #             for token_id in valid_predicted_tokens:
+                #                 try:
+                #                     token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                #                     token_texts.append(token_text)
+                #                 except:
+                #                     token_texts.append(f"<UNK:{token_id}>")
+                #             predicted_texts.append("".join(token_texts))
+                    
+                #     # Process label tokens
+                #     valid_label_tokens = label[i][mask].cpu().tolist()
+                #     if len(valid_label_tokens) == 0:
+                #         label_texts.append("")
+                #     else:
+                #         try:
+                #             # Decode the valid label token IDs to text
+                #             text = self.tokenizer.decode(valid_label_tokens, skip_special_tokens=True)
+                #             label_texts.append(text)
+                #         except Exception as e:
+                #             # Fallback to token-by-token decoding if batch decode fails
+                #             token_texts = []
+                #             for token_id in valid_label_tokens:
+                #                 try:
+                #                     token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                #                     token_texts.append(token_text)
+                #                 except:
+                #                     token_texts.append(f"<UNK:{token_id}>")
+                #             label_texts.append("".join(token_texts))
+                
+                # print(f"=== {predicted_texts=}, {label_mask.shape=}, {response_length=}, {predicted_tokens.shape=}===")
+                # print(f"=== {label_texts=} ===")
+                
                 return ret
 
             logits_processor_args = {"label": label, "label_mask": label_mask}

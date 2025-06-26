@@ -282,3 +282,37 @@ def hf_to_mcore_config_qwen2_5_vl(hf_config: PretrainedConfig, dtype: torch.dtyp
 def hf_to_mcore_config_llama4(hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs) -> TransformerConfig:
     # Llama4ForConditionalGeneration
     raise NotImplementedError("Llama4ForConditionalGeneration is not supported yet")
+
+
+def hf_to_mcore_config_xdgmoe(hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs) -> TransformerConfig:
+    from cybertron.models.deepseek_v2.configure_deepseekv2 import DeepseekV2TransformerConfig
+    args = _get_base_transformer_config(
+        hf_config=hf_config,
+        dtype=dtype,
+        use_cpu_initialization=False,
+        add_bias_linear=False,
+        layernorm_epsilon=hf_config.rms_norm_eps,
+        max_position_embeddings=hf_config.max_position_embeddings,
+        # MoE specific
+        moe_ffn_hidden_size=hf_config.moe_intermediate_size,
+        moe_router_topk=hf_config.num_experts_per_tok,
+        num_moe_experts=hf_config.n_routed_experts,
+        moe_shared_expert_intermediate_size=hf_config.moe_intermediate_size * hf_config.n_shared_experts,
+        first_k_dense_replace=hf_config.first_k_dense_replace,
+        routed_scaling_factor=hf_config.routed_scaling_factor,
+        # moe_aux_loss_coeff=hf_config.router_aux_loss_coef,
+        use_router_expert_score_correction=True,
+        # moe_aux_loss_coeff=0.0,
+        moe_router_load_balancing_type="greedy",  # turn off aux_loss as it hurts perf in RL
+        moe_grouped_gemm=True,
+        router_scoring_func="sigmoid",
+        # Other optimizations
+        persist_layer_norm=True,
+        bias_activation_fusion=True,
+        bias_dropout_fusion=True,
+        # Qwen specific
+        qk_layernorm=True,
+        multi_latent_attention=False,
+        **override_transformer_config_kwargs,
+    )
+    return DeepseekV2TransformerConfig(**args)
