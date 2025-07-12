@@ -9,48 +9,47 @@ from tqdm import tqdm
 
 
 class HfMcoreManager:
-    QKV_FUSE_NAME = ".linear_qkv."
-    GATE_UP_FUSE_NAME = ".linear_fc1."
-    UP_NAME = ".up_proj."
-    Q_NAME = ".q_proj."
-    REPLACE_DICT = {
-        "up_proj.": "linear_fc1.",
-        "down_proj.": "linear_fc2.",
-        "model.embed_tokens.": "embedding.word_embeddings.",
-        "model.layers.": "decoder.layers.",
-        "input_layernorm.weight": "self_attention.linear_qkv.layer_norm_weight",
-        "self_attn.q_proj.": "self_attention.linear_q.",
-        "self_attn.k_proj.": "self_attention.linear_k.",
-        "self_attn.v_proj.": "self_attention.linear_v.",
-        "self_attn.o_proj.": "self_attention.linear_proj.",
-        "self_attn.q_layernorm.": "self_attention.q_layernorm.",
-        "self_attn.k_layernorm.": "self_attention.k_layernorm.",
-        "self_attn.kv_layernorm.": "self_attention.kv_layernorm.",
-        "self_attn.q_proj.": "self_attention.linear_q_proj.",
-        "self_attn.q_a_proj.": "self_attention.linear_q_down_proj.",
-        "self_attn.q_b_proj.": "self_attention.linear_q_up_proj.",
-        "self_attn.kv_a_proj_with_mqa.": "self_attention.linear_kv_down_proj.",
-        "self_attn.kv_b_proj.": "self_attention.linear_kv_up_proj.",
-        "post_attention_layernorm.": "pre_mlp_layernorm.",
-        ".gate_proj.": ".linear_gate.",
-        ".gate.": ".router.",
-        "model.norm.": "decoder.final_layernorm.",
-        "lm_head.": "output_layer.",
-    }
-
-    split_mode_dict = {
-        "self_attn.o_proj": (True, 1),  # RowParallel
-        "down_proj": (True, 1),  # RowParallel
-        "linear_q_up_proj": (True, 0),
-        "self_attn.q_proj": (True, 0),
-        "lm_head": (True, 0),
-        "embed_tokens": (True, 0),
-        "gate_proj": (True, 0),
-        "up_proj": (True, 0)
-    }
 
     def __init__(self):
-        pass
+        self.QKV_FUSE_NAME = ".linear_qkv."
+        self.GATE_UP_FUSE_NAME = ".linear_fc1."
+        self.UP_NAME = ".up_proj."
+        self.Q_NAME = ".q_proj."
+        self.REPLACE_DICT = {
+            "up_proj.": "linear_fc1.",
+            "down_proj.": "linear_fc2.",
+            "model.embed_tokens.": "embedding.word_embeddings.",
+            "model.layers.": "decoder.layers.",
+            "input_layernorm.weight": "self_attention.linear_qkv.layer_norm_weight",
+            "self_attn.q_proj.": "self_attention.linear_q.",
+            "self_attn.k_proj.": "self_attention.linear_k.",
+            "self_attn.v_proj.": "self_attention.linear_v.",
+            "self_attn.o_proj.": "self_attention.linear_proj.",
+            "self_attn.q_layernorm.": "self_attention.q_layernorm.",
+            "self_attn.k_layernorm.": "self_attention.k_layernorm.",
+            "self_attn.kv_layernorm.": "self_attention.kv_layernorm.",
+            # "self_attn.q_proj.": "self_attention.linear_q_proj.",
+            "self_attn.q_a_proj.": "self_attention.linear_q_down_proj.",
+            "self_attn.q_b_proj.": "self_attention.linear_q_up_proj.",
+            "self_attn.kv_a_proj_with_mqa.": "self_attention.linear_kv_down_proj.",
+            "self_attn.kv_b_proj.": "self_attention.linear_kv_up_proj.",
+            "post_attention_layernorm.": "pre_mlp_layernorm.",
+            ".gate_proj.": ".linear_gate.",
+            ".gate.": ".router.",
+            "model.norm.": "decoder.final_layernorm.",
+            "lm_head.": "output_layer.",
+        }
+
+        self.split_mode_dict = {
+            "self_attn.o_proj": (True, 1),  # RowParallel
+            "down_proj": (True, 1),  # RowParallel
+            "linear_q_up_proj": (True, 0),
+            "self_attn.q_proj": (True, 0),
+            "lm_head": (True, 0),
+            "embed_tokens": (True, 0),
+            "gate_proj": (True, 0),
+            "up_proj": (True, 0)
+        }
 
     def is_qkv_fusion(self, layer_name):
         suffix = ["weight", "bias"]
@@ -97,6 +96,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         ep_size=None,
         ep_rank=None,
     ):
+        super().__init__()
         self.model_config = model_config
         self.model_path = config.model.path
 

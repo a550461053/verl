@@ -15,6 +15,8 @@
 import os
 import random
 from typing import Optional
+from dataclasses import is_dataclass
+from argparse import Namespace
 
 import numpy as np
 import torch
@@ -53,6 +55,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
     def __init__(
         self,
+        tf_config,
         config,
         model_config,
         role,
@@ -77,6 +80,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             checkpoint_contents=checkpoint_contents,
         )
         self.arch = arch
+        self.tf_config = tf_config
         self.config = config
         self.role = role
         self.is_value_model = False
@@ -233,18 +237,34 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         local_path = self.local_mkdir(local_path)
 
         # Save Model
-        if "model" in self.checkpoint_contents and mpu.get_data_parallel_rank() == 0:
-            state_dicts = []
+        if "model" in self.checkpoint_contents and torch.distributed.get_rank(group=mpu.get_data_modulo_expert_parallel_group()) == 0:
+            state_dict = {}
+            args = self.tf_config
+            if is_dataclass(args):
+                args = Namespace(**args.__dict__)
+            
+            remove_properties = ["init_method", "output_layer_init_method"]
+            for prop in remove_properties:
+                if hasattr(args, prop):
+                    delattr(args, prop)
 
-            for vpp_rank, model in enumerate(self.model):
-                state_dict = model.state_dict()
-                state_dicts.append(state_dict)
+            state_dict['args'] = args
+
+            if len(self.model) == 1:
+                state_dict['model'] = self.model[0].state_dict()
+            else:
+                for i in range(len(self.model)):
+                    mpu.set_virtual_pipeline_model_parallel_rank(i)
+                    state_dict['model%d' % i] = (
+                        self.model[i].state_dict()
+                    )
+                mpu.set_virtual_pipeline_model_parallel_rank(0)
 
             print(f"Saving sharded model checkpoint to {local_path}")
             model_ckpt_path = get_model_checkpoint_path(local_path)
             hf_config_and_tokenizer_path = get_hf_config_and_tokenizer_checkpoint_path(local_path)
             ckpt_name = self.get_checkpoint_name(model_ckpt_path, return_base_dir=False)
-            torch.save(state_dicts, os.path.join(ckpt_name))
+            torch.save(state_dict, os.path.join(ckpt_name))
 
             print(f"Saved checkpoint to {model_ckpt_path}")
             if self.rank == 0:

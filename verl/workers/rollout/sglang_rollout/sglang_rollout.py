@@ -169,6 +169,11 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
             load_format=load_format,
             flush_cache=flush_cache,
         )
+        print(f"==== {self.server_args.tp_size=}, named_tensors={named_tensors[0][0]} ====")
+        tp1 = obj.serialized_named_tensors[0]
+        tp8 = obj.serialized_named_tensors[8]
+        MultiprocessingSerializer.deserialize(tp1)
+        MultiprocessingSerializer.deserialize(tp8)
         return await self.tokenizer_manager.update_weights_from_tensor(obj, None)
 
     async def flush_cache(self):

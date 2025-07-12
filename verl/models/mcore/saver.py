@@ -107,6 +107,7 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
     if not isinstance(wrapped_models, (list, tuple)):
         wrapped_models = list(wrapped_models)
 
+    # TODO: support uneven pp
     assert len(wrapped_models) == virtual_pp_size
     num_layers_per_model = config.num_hidden_layers // pp_size // virtual_pp_size
     assert num_layers_per_model * pp_size * virtual_pp_size == config.num_hidden_layers
@@ -371,12 +372,12 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
             if gpt_model_module.config.qk_layernorm:
                 _broadcast_tensor(
                     sync_layer.self_attention.q_layernorm.weight,
-                    f"{layer_name}.self_attn.q_norm.weight",
+                    f"{layer_name}.self_attn.q_layernorm.weight",
                     src_pp_rank=src_pp_rank,
                 )
                 _broadcast_tensor(
                     sync_layer.self_attention.k_layernorm.weight,
-                    f"{layer_name}.self_attn.k_norm.weight",
+                    f"{layer_name}.self_attn.k_layernorm.weight",
                     src_pp_rank=src_pp_rank,
                 )
 
@@ -405,7 +406,7 @@ def merge_megatron_ckpt_gptmodel(wrapped_models, config, dtype, is_value_model=F
             )
 
             _broadcast_tensor(
-                sync_layer.mlp.linear_fc1.layer_norm_weight,
+                sync_layer.pre_mlp_layernorm.weight,
                 f"{layer_name}.post_attention_layernorm.weight",
                 src_pp_rank=src_pp_rank,
             )
@@ -473,3 +474,5 @@ def merge_megatron_ckpt_gptmodel_dpskv3(wrapped_models, config, dtype, is_value_
 
 def merge_megatron_ckpt_gptmodel_mixtral(wrapped_models, config, dtype, is_value_model=False, tie_word_embeddings=False):
     raise NotImplementedError("merge_megatron_ckpt_gptmodel_mixtral is not implemented")
+
+

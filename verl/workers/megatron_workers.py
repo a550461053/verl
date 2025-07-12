@@ -159,11 +159,15 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         # Step 3: initialize the megatron model
         if self._is_actor and self._is_rollout:
+            from verl.utils.megatron_utils import start_record_memory_history, stop_record_memory_history
+            # start_record_memory_history()
             actor_module = get_model(
                 megatron_actor_model_provider,
                 wrap_with_ddp=True,
                 use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
             )
+            # stop_record_memory_history()
+            log_gpu_memory_usage("After get_model", logger=logger)
             print(f"actor_module: {len(actor_module)}")
             if self.config.actor.load_weight:
                 if self.config.actor.megatron.use_dist_checkpointing:
@@ -383,6 +387,7 @@ class ActorRolloutRefWorker(MegatronWorker):
                 tf_config=self.tf_config,
                 actor_module=self.ref_module,
                 actor_optimizer=None,
+                tokenizer=self.tokenizer,
             )
             if self._ref_is_offload_param:
                 offload_megatron_model_to_cpu(self.ref_module)
@@ -391,6 +396,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_mananager = MegatronCheckpointManager(
+                tf_config=self.tf_config,
                 config=self.config,
                 model_config=self.actor_model_config,
                 role="actor",
@@ -412,9 +418,11 @@ class ActorRolloutRefWorker(MegatronWorker):
     def update_actor(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
+            log_gpu_memory_usage("Before load actor params and grad during update_actor", logger=logger)
             load_megatron_model_to_gpu(self.actor_module)
             log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)
         if self._is_offload_optimizer:
+            log_gpu_memory_usage("Before load actor optimizer during update_actor", logger=logger)
             load_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
         data.batch = data.batch.cuda()
@@ -448,6 +456,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
         if self._is_offload_param:
+            log_gpu_memory_usage("Before load actor params during generate_sequences", logger=logger)
             load_megatron_model_to_gpu(self.actor_module)
             log_gpu_memory_usage("After load actor params during generate_sequences", logger=logger)
         prompts.batch = prompts.batch.cuda()
@@ -460,8 +469,8 @@ class ActorRolloutRefWorker(MegatronWorker):
             offload_megatron_optimizer(self.actor_optimizer)
 
         with self.sharding_manager:
-            if self._is_offload_param:
-                offload_megatron_model_to_cpu(self.actor_module)
+            # if self._is_offload_param:
+            #     offload_megatron_model_to_cpu(self.actor_module)
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
 
             # (zhangchi.usc1992) wake up kv cache here. Currently only support vllm.
@@ -478,6 +487,8 @@ class ActorRolloutRefWorker(MegatronWorker):
             output = self.rollout.generate_sequences(prompts=prompts)
             output = self.sharding_manager.postprocess_data(output)
 
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
         output = output.to("cpu")
         # clear kv cache
         torch.cuda.empty_cache()
@@ -721,6 +732,7 @@ class CriticWorker(MegatronWorker):
         )
         self.flops_counter = FlopsCounter(self.critic_model_config)
         self.checkpoint_mananager = MegatronCheckpointManager(
+            tf_config=self.tf_config,
             config=self.config,
             model_config=self.critic_model_config,
             role="critic",

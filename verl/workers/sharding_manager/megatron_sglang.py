@@ -142,7 +142,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         if self.device_mesh["tp"].get_local_rank() == 0:
             await self.inference_engine.release_memory_occupation()
 
-    @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
+    @GPUMemoryLogger(role="MegatronSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
         per_tensor_param = per_tensor_generator(
             self.actor_module,
@@ -157,7 +157,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             self.torch_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.gen_random_states)
 
-    @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
+    @GPUMemoryLogger(role="MegatronSGLangShardingManager exit", logger=logger)
     async def sleep(self):
         log_gpu_memory_usage("Before SGLang offload in sharding manager", logger=logger)
         await self.release_memory()

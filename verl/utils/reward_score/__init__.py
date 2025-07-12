@@ -88,6 +88,10 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         from .ifeval_online import compute_score
 
         res = compute_score(solution_str, ground_truth)
+    elif data_source in ['deepscaler']:
+        from .math_verify import compute_score
+        res = compute_score(solution_str, ground_truth, timeout_score=2)
+        
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 

@@ -20,6 +20,8 @@ import gc
 import os
 import warnings
 from typing import Any, Dict
+import socket
+from datetime import datetime, timedelta
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +38,38 @@ from transformers import PretrainedConfig
 import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
+
+
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
+
+
+def start_record_memory_history() -> None:
+   if not torch.cuda.is_available():
+       print("CUDA unavailable. Not recording memory history")
+       return
+
+   print("Starting snapshot record_memory_history")
+   torch.cuda.memory._record_memory_history(
+       max_entries=100000
+   )
+
+def stop_record_memory_history() -> None:
+   if not torch.cuda.is_available():
+       print("CUDA unavailable. Not recording memory history")
+       return
+    
+    # Prefix for file names.
+   host_name = socket.gethostname()
+   timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+   file_prefix = f"{host_name}_{timestamp}"
+
+   try:
+       print(f"Saving snapshot to local file: {file_prefix}.pickle")
+       torch.cuda.memory._dump_snapshot(f"{file_prefix}.pickle")
+   except Exception as e:
+       print(f"Failed to capture memory snapshot {e}")
+
+   torch.cuda.memory._record_memory_history(enabled=None)
 
 
 def get_model_config(model):
@@ -449,10 +483,10 @@ def get_optimizer_checkpoint_path(checkpoint_path, use_distributed_optimizer=Tru
         return os.path.join(checkpoint_path, "optim", "optim.pt")
     pp_rank = mpu.get_pipeline_model_parallel_rank()
     tp_rank = mpu.get_tensor_model_parallel_rank()
-    cp_rank = mpu.get_context_parallel_rank()
-    dp_rank = mpu.get_data_parallel_rank()
-    # TODO: support ep
-    return os.path.join(checkpoint_path, "optim", f"distrib_optim_pp{pp_rank}_tp{tp_rank}_cp{cp_rank}_dp{dp_rank}.pt")
+    # cp_rank = mpu.get_context_parallel_rank()
+    # dp_rank = mpu.get_data_parallel_rank()
+    ep_rank = mpu.get_expert_model_parallel_rank()
+    return os.path.join(checkpoint_path, "optim", f"distrib_optim_pp{pp_rank}_tp{tp_rank}_ep{ep_rank}.pt")
 
 
 def get_rng_states_checkpoint_path(checkpoint_path, only_rank0_save=True):
@@ -853,7 +887,7 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
     Extension to https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_layer.py::get_transformer_layer_offset"""
     '''
     if config.pipeline_model_parallel_size > 1:
-        if config.num_layers_in_first_pipeline_stage is not None or config.num_layers_in_last_pipeline_stage is not None:
+        if config.first_pipeline_num_layers is not None or config.last_pipeline_num_layers is not None:
             # Calculate number of pipeline stages to distribute the remaining Transformer
             # layers after deducting the Transformer layers in the first or the last stages
             middle_pipeline_stages = config.pipeline_model_parallel_size
@@ -861,8 +895,8 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 [
                     1 if x is not None else 0
                     for x in (
-                        config.num_layers_in_first_pipeline_stage,
-                        config.num_layers_in_last_pipeline_stage,
+                        config.first_pipeline_num_layers,
+                        config.last_pipeline_num_layers,
                     )
                 ]
             )
@@ -871,10 +905,10 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
             # num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage
             # are not set, we will not enable uneven pipeline. All layers will be treated
             # as middle layers.
-            num_layers_in_first_pipeline_stage = 0 if config.num_layers_in_first_pipeline_stage is None else config.num_layers_in_first_pipeline_stage
-            num_layers_in_last_pipeline_stage = 0 if config.num_layers_in_last_pipeline_stage is None else config.num_layers_in_last_pipeline_stage
+            first_pipeline_num_layers = 0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers
+            last_pipeline_num_layers = 0 if config.last_pipeline_num_layers is None else config.last_pipeline_num_layers
 
-            middle_num_layers = config.num_layers - num_layers_in_first_pipeline_stage - num_layers_in_last_pipeline_stage
+            middle_num_layers = config.num_layers - first_pipeline_num_layers - last_pipeline_num_layers
 
             if mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
                 vp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
@@ -883,9 +917,9 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 # If the num_layers_in_first_pipeline_stage and
                 # num_layers_in_last_pipeline_stage are not set, all pipeline stages
                 # will be treated as middle pipeline stages in the calculation
-                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = 0 if config.num_layers_in_first_pipeline_stage is None else config.num_layers_in_first_pipeline_stage // vp_size
+                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = 0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers // vp_size
 
-                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = 0 if config.num_layers_in_last_pipeline_stage is None else config.num_layers_in_last_pipeline_stage // vp_size
+                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = 0 if config.last_pipeline_num_layers is None else config.last_pipeline_num_layers // vp_size
 
                 num_layers_per_vritual_model_chunk_in_middle_pipeline_stage = middle_num_layers // vp_size
 
@@ -903,22 +937,14 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 else:
                     num_layers_per_pipeline_rank = 0
 
-                middle_pipeline_rank = pipeline_rank if config.num_layers_in_first_pipeline_stage is None else pipeline_rank - 1
+                middle_pipeline_rank = pipeline_rank if config.first_pipeline_num_layers is None else pipeline_rank - 1
 
                 if pipeline_rank == 0:
                     offset = 0
                 else:
-                    offset = (middle_pipeline_rank * num_layers_per_pipeline_rank) + num_layers_in_first_pipeline_stage
+                    offset = (middle_pipeline_rank * num_layers_per_pipeline_rank) + first_pipeline_num_layers
         else:
             num_layers = config.num_layers
-
-            # Increase the number of layers by one if we include the embedding (loss)
-            # layer into pipeline parallelism partition and placement
-            if config.account_for_embedding_in_pipeline_split:
-                num_layers += 1
-
-            if config.account_for_loss_in_pipeline_split:
-                num_layers += 1
 
             num_layers_per_pipeline_rank = num_layers // config.pipeline_model_parallel_size
 
@@ -929,15 +955,8 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 total_virtual_chunks = num_layers // vp_size
                 offset = vp_rank * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
 
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not mpu.is_pipeline_first_stage():
-                    offset -= 1
             else:
                 offset = pipeline_rank * num_layers_per_pipeline_rank
-
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not mpu.is_pipeline_first_stage():
-                    offset -= 1
     else:
         offset = 0
     return offset
