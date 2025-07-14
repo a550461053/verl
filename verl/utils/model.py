@@ -372,6 +372,8 @@ def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_
     ep_rank = parallel_state.get_expert_model_parallel_rank()
     ep_size = parallel_state.get_expert_model_parallel_world_size()
     vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
+    etp_size = parallel_state.get_expert_tensor_parallel_world_size()
+    etp_rank = parallel_state.get_expert_tensor_parallel_rank()
     if vp_size is None:
         vp_size = 1
     pp_size_with_vp = vp_size * pp_size
@@ -381,9 +383,9 @@ def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_
         loader = DeepseekV2HfLoader(config, model_config, tp_size=tp_size, tp_rank=tp_rank, pp_size=pp_size_with_vp, pp_rank=pp_rank_with_vp, ep_size=ep_size, ep_rank=ep_rank)
         state_dict = loader.load()
         missing_keys, unexpected_keys = model_chunks[i].load_state_dict(state_dict, strict=False)
-        assert len(unexpected_keys) == 0, f'Unexpected keys is not accepted: {unexpected_keys}'
         assert all(
         map(lambda x: '_extra_state' in x, missing_keys)), f'Only missing "_extra_state" or "rm_head" is accepted. But got {list(filter(lambda x: "_extra_state" not in x, missing_keys))}'
+        assert len(unexpected_keys) == 0, f'Unexpected keys is not accepted: {unexpected_keys}, {model_chunks[i]}'
     
 
 

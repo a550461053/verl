@@ -14,9 +14,10 @@
 """
 The main entry point to run the PPO algorithm
 """
-
+import asyncio
 import logging
 import os
+import ray
 import time
 import warnings
 from typing import Union
@@ -28,7 +29,7 @@ from megatron.core import parallel_state as mpu
 from omegaconf import DictConfig
 
 from verl import DataProto
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, Execute, register
 from verl.single_controller.base.megatron.worker import MegatronWorker
 from verl.utils import hf_tokenizer
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -79,33 +80,6 @@ class ActorRolloutRefWorker(MegatronWorker):
         super().__init__()
         self.config = config
 
-        # NOTE(sgm): We utilize colocate WorkerGroup by default.
-        # As a result, Workers for different model share the same process.
-        # Therefore, we only require one distribute initialization.
-        # To utilize different parallel startegy in different models:
-        # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
-        # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
-        if not torch.distributed.is_initialized():
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend="nccl")
-            torch.cuda.set_device(rank)
-
-            if self.config.actor.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.actor.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.actor.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.actor.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.actor.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.actor.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
-
-        set_random_seed(seed=self.config.actor.megatron.seed)
-
         self.role = role
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
 
@@ -119,8 +93,98 @@ class ActorRolloutRefWorker(MegatronWorker):
         self._is_offload_grad = False
         self._is_offload_optimizer = False
 
+        def enable_megatron_sequence_parallel():
+            if self._is_actor and self.config.actor.megatron.sequence_parallel:
+                return True
+            if self._is_ref and self.config.ref.megatron.sequence_parallel:
+                return True
+            return False
+
+        def tp():
+            if self._is_actor:
+                return self.config.actor.megatron.tensor_model_parallel_size
+            if self._is_ref:
+                return self.config.ref.megatron.tensor_model_parallel_size
+            return 1
+        def pp():
+            if self._is_actor:
+                return self.config.actor.megatron.pipeline_model_parallel_size
+            if self._is_ref:
+                return self.config.ref.megatron.pipeline_model_parallel_size
+            return 1
+        def vpp():
+            _vpp = None
+            if self._is_actor:
+                _vpp = self.config.actor.megatron.virtual_pipeline_model_parallel_size
+            if self._is_ref:
+                _vpp = self.config.ref.megatron.virtual_pipeline_model_parallel_size
+            if type(_vpp) is str:
+                _vpp = eval(_vpp)
+            return _vpp
+        def cp():
+            if self._is_actor:
+                return self.config.actor.megatron.context_parallel_size
+            if self._is_ref:
+                return self.config.ref.megatron.context_parallel_size
+            return 1
+        def ep():
+            if self._is_actor:
+                return self.config.actor.megatron.expert_model_parallel_size
+            if self._is_ref:
+                return self.config.ref.megatron.expert_model_parallel_size
+            return 1
+        def etp():
+            _etp = None
+            if self._is_actor:
+                _etp = self.config.actor.megatron.expert_tensor_parallel_size
+            if self._is_ref:
+                _etp = self.config.ref.megatron.expert_tensor_parallel_size
+            if type(_etp) is str:
+                _etp = eval(_etp)
+            return _etp
+        
+        def seed():
+            if self._is_actor:
+                return self.config.actor.megatron.seed
+            if self._is_ref:
+                return self.config.ref.megatron.seed
+            return 42
+
+        # 分离架构判断
+        self._is_sperated_arch = not (self._is_actor and self._is_rollout)
+
+        # NOTE(sgm): We utilize colocate WorkerGroup by default.
+        # As a result, Workers for different model share the same process.
+        # Therefore, we only require one distribute initialization.
+        # To utilize different parallel startegy in different models:
+        # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
+        # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
+        if not torch.distributed.is_initialized():
+            rank = int(os.environ["LOCAL_RANK"])
+            from datetime import timedelta
+            timeout_second = 3600
+            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=timeout_second))
+
+            torch.cuda.set_device(rank)
+
+            if enable_megatron_sequence_parallel():
+                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+            mpu.initialize_model_parallel(
+                tensor_model_parallel_size=tp(), #self.config.actor.megatron.tensor_model_parallel_size,
+                pipeline_model_parallel_size=pp(), #self.config.actor.megatron.pipeline_model_parallel_size,
+                virtual_pipeline_model_parallel_size=vpp(), #self.config.actor.megatron.virtual_pipeline_model_parallel_size,
+                pipeline_model_parallel_split_rank=None,
+                use_sharp=False,
+                context_parallel_size=cp(), #self.config.actor.megatron.context_parallel_size,
+                expert_model_parallel_size=ep(), #self.config.actor.megatron.expert_model_parallel_size,
+                expert_tensor_parallel_size=etp(), #self.config.actor.megatron.expert_tensor_parallel_size,
+                nccl_communicator_config_path=None,
+            )
+
+        set_random_seed(seed=seed()) #self.config.actor.megatron.seed)
+
         # normalize config
-        if self._is_actor and self._is_rollout:
+        if (self._is_actor and self._is_rollout) or (self._is_actor and self._is_sperated_arch):
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
             if self.config.actor.get("ppo_micro_batch_size", None):
@@ -129,7 +193,8 @@ class ActorRolloutRefWorker(MegatronWorker):
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
                 self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
 
-            self._is_offload_param = self.config.actor.megatron.get("param_offload", False)
+            if not self._is_sperated_arch:
+                self._is_offload_param = self.config.actor.megatron.get("param_offload", False)
             self._is_offload_grad = self.config.actor.megatron.get("grad_offload", False)
             self._is_offload_optimizer = self.config.actor.megatron.get("optimizer_offload", False)
         elif self._is_ref:
@@ -139,6 +204,33 @@ class ActorRolloutRefWorker(MegatronWorker):
             else:
                 assert self.config.ref.get("log_prob_micro_batch_size_per_gpu", None) is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
             self._ref_is_offload_param = self.config.ref.megatron.get("param_offload", False)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
+    def setup_for_queue(self, queue):
+        self._store_refs_queue = queue
+        if hasattr(self, "param_update_manager"):
+            self.param_update_manager.setup_for_queue(queue)
+
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
+    def check_for_ray_col(self, col_name="actor_rollout_sync"):
+        from ray.util.collective import get_rank, get_collective_group_size, is_group_initialized
+        ray_col_name = col_name
+        ok = is_group_initialized(group_name=ray_col_name)
+        rank = get_rank(group_name=ray_col_name)
+        size = get_collective_group_size(group_name=ray_col_name)
+        worker_id = ray.get_runtime_context().get_worker_id()
+        print(f"check_for_ray_col ok: {ok}, rank: {rank}, self.rank:{self.rank}, size: {size}, worker_id: {worker_id}")
+        
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
+    def setup_for_ray_col(self, rank_offset, size, name, backend="nccl"):
+        engine_tp_size = self.config.rollout.tensor_model_parallel_size
+        # TODO: support PP/EP
+        engine_nums = (size - rank_offset) // engine_tp_size
+        is_engine_master = self.rank % engine_tp_size == 0
+        self.param_update_manager.setup_for_ray_col(self.rank + rank_offset, size, rank_offset, engine_nums, engine_tp_size, is_engine_master, name, backend)
+
+        return True
 
     def _build_model_optimizer(self, model_path, optim_config, override_model_config, override_transformer_config):
         from megatron.core.models.gpt.gpt_model import ModelType
@@ -178,6 +270,25 @@ class ActorRolloutRefWorker(MegatronWorker):
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+        elif self._is_actor:
+            from verl.utils.megatron_utils import start_record_memory_history, stop_record_memory_history
+            # start_record_memory_history()
+            actor_module = get_model(
+                megatron_actor_model_provider,
+                model_type=ModelType.encoder_or_decoder,
+                wrap_with_ddp=True,
+                use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+            )
+            # stop_record_memory_history()
+            if self.config.actor.load_weight:
+                if self.config.actor.megatron.use_dist_checkpointing:
+                    load_mcore_dist_weights(actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False)
+                else:
+                    load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
+
+            if self.rank == 0:
+                print_model_size(actor_module[0])
+            log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
         elif self._is_ref:
             print(f"self.config.ref.load_weight: {self.config.ref.load_weight}")
             ref_module = get_model(
@@ -197,6 +308,9 @@ class ActorRolloutRefWorker(MegatronWorker):
                     load_megatron_gptmodel_weights(self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
             log_gpu_memory_usage("After ref module init", logger=logger)
             return ref_module, self.hf_config
+        else:
+            # rollout only
+            actor_module = None
 
         # TODO: add more optimizer args into config
         if self._is_actor:
@@ -210,9 +324,51 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         return actor_module, actor_optimizer, self.hf_config, optim_config
 
+    def _build_param_update_manager(self):
+        from verl.workers.param_update.param_update import ParamUpdateManager
+        if self._is_actor or self._is_rollout:
+            # we only need param update manager for actor and rollout
+            
+            # TODO: copy from _build_rollout
+            layer_name_mapping = {
+                "qkv_layer_name": "self_attention.linear_qkv.",
+                "gate_proj_layer_name": "linear_fc1.weight",
+            }
+
+            from verl.models.mcore import get_mcore_weight_converter
+
+            weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
+
+            actor_module=self.actor.actor_module if self._is_actor else None
+
+            param_update_manager = ParamUpdateManager(
+                model_params=actor_module,
+                model_config=self.actor_model_config,
+                weight_converter=weight_converter,
+                transformer_config=self.tf_config,
+                layer_name_mapping=layer_name_mapping,
+                convert_qkv_gate_up_by_simple_split=True,
+                param_update_preduce_bucket_size_mb=self.config.actor.get("param_update_preduce_bucket_size_mb", 512),
+            )
+            
+            # 注册actor集群（如果配置了的话）
+            if hasattr(self.config, 'actor_clusters'):
+                train_ranks = self.config.actor_clusters.get('train_ranks', [])
+                generate_ranks = self.config.actor_clusters.get('generate_ranks', [])
+                world_size = self.config.actor_clusters.get('world_size', self.world_size)
+                
+                if train_ranks and generate_ranks:
+                    param_update_manager.register_actor_clusters(train_ranks, generate_ranks, world_size)
+                    print(f"Registered actor clusters: train_ranks={train_ranks}, generate_ranks={generate_ranks}, world_size={world_size}")
+        else:
+            # ref does not need param update manager
+            param_update_manager = None
+        return param_update_manager
+        
+
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
-
+        
         layer_name_mapping = {
             "qkv_layer_name": "self_attention.linear_qkv.",
             "gate_proj_layer_name": "linear_fc1.weight",
@@ -279,7 +435,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             # "RuntimeError: No CUDA GPUs are available".
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and we import it here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-            from verl.workers.sharding_manager.megatron_sglang import MegatronSGLangShardingManager
+            from verl.workers.sharding_manager.megatron_sglang import MegatronSGLangShardingManager, MegatronSGLangAsyncShardingManager
 
             infer_tp = self.config.rollout.tensor_model_parallel_size
             dp = self.world_size // infer_tp
@@ -295,14 +451,16 @@ class ActorRolloutRefWorker(MegatronWorker):
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
                 device_mesh=rollout_device_mesh,
+                param_update_manager=self.param_update_manager,  # 传入param_update_manager
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
 
             from verl.models.mcore import get_mcore_weight_converter
 
             weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
-            sharding_manager = MegatronSGLangShardingManager(
-                actor_module=self.actor.actor_module,
+            sharding_manager_cls = MegatronSGLangAsyncShardingManager if self._is_sperated_arch else MegatronSGLangShardingManager
+            sharding_manager = sharding_manager_cls(
+                actor_module=self.actor.actor_module if self._is_actor else None,
                 inference_engine=rollout._engine,
                 model_config=self.actor_model_config,
                 transformer_config=self.tf_config,
@@ -313,8 +471,8 @@ class ActorRolloutRefWorker(MegatronWorker):
             log_gpu_memory_usage("After building sharding manager", logger=logger)
         else:
             raise NotImplementedError("Only vllmRollout is supported with Megatron now")
-        print(f"rollout and sharding manager init done sharding_manager: {sharding_manager}")
         return rollout, sharding_manager
+
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -334,7 +492,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         elif self._is_ref:
             override_transformer_config = OmegaConf.to_container(self.config.ref.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
         else:
-            override_transformer_config = None
+            override_transformer_config = {}
         self.param_dtype = torch.bfloat16
         log_gpu_memory_usage("Before init actor model and optimizer", logger=logger)
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
@@ -365,6 +523,12 @@ class ActorRolloutRefWorker(MegatronWorker):
                 tokenizer=self.tokenizer,
             )
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+
+        self.param_update_manager = None
+        if self._is_sperated_arch and (self._is_actor or self._is_rollout):
+            # we need the param update manager for actor and rollout
+            self.param_update_manager = self._build_param_update_manager()
+            log_gpu_memory_usage("After param update manager init", logger=logger)
 
         if self._is_rollout:
             self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
@@ -417,6 +581,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     @GPUMemoryLogger(role="update_actor", logger=logger)
     def update_actor(self, data: DataProto):
         assert self._is_actor
+        import time
         if self._is_offload_param:
             log_gpu_memory_usage("Before load actor params and grad during update_actor", logger=logger)
             load_megatron_model_to_gpu(self.actor_module)
@@ -429,9 +594,12 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
+
         dataloader = self.actor.make_minibatch_iterator(data=data)
+
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(dataloader=dataloader)
+
         delta_time = timer.last
         global_num_tokens = data.meta_info["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -451,14 +619,68 @@ class ActorRolloutRefWorker(MegatronWorker):
         torch.cuda.empty_cache()
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
+    @GPUMemoryLogger(role="sync_per_tensor_generator", logger=logger)
+    def sync_per_tensor_generator(self):
+        """
+        This is used to synchronize the model parameters between the actor and the rollout.
+        It is used to ensure that the rollout has the latest model parameters.
+        """
+        assert self._is_rollout or self._is_actor
+        if self._is_actor:
+            update_weight_func_call = None
+        else:
+            # is_rollout
+            update_weight_func_call = self.rollout.get_update_weight_func()
+        self.param_update_manager.sync_per_tensor_generator(update_weight_func_call)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
+    @GPUMemoryLogger(role="async_param_update", logger=logger)
+    def async_param_update(self):
+        if not hasattr(self.param_update_manager, "async_param_update"):
+            return
+        assert self._is_rollout or self._is_actor
+        if self._is_actor:
+            update_weight_func_call = None
+        else:
+            # is_rollout
+            update_weight_func_call = self.rollout.get_update_weight_func()
+        self.param_update_manager.async_param_update(update_weight_func_call)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
+    @GPUMemoryLogger(role="wait_for_send_complete", logger=logger)
+    def wait_for_send_complete(self):
+        if hasattr(self.param_update_manager, "wait_for_send_complete"):
+            self.param_update_manager.wait_for_send_complete()
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    @GPUMemoryLogger(role="get_params_meta", logger=logger)
+    def get_params_meta(self):
+        """
+        Get the meta information of the model parameters.
+        This is used for loading the model parameters from the checkpoint.
+        """
+        assert self._is_rollout or self._is_actor
+        params_meta = self.param_update_manager.get_params_meta()
+        return params_meta
+        
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    @GPUMemoryLogger(role="set_params_meta", logger=logger)
+    def set_params_meta(self, params_meta):
+        """
+        Set the meta information of the model parameters.
+        This is used for loading the model parameters from the checkpoint.
+        """
+        assert self._is_rollout or self._is_actor
+        self.param_update_manager.set_params_meta(params_meta)
+        self.rollout.set_params_meta(params_meta)
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
         if self._is_offload_param:
-            log_gpu_memory_usage("Before load actor params during generate_sequences", logger=logger)
             load_megatron_model_to_gpu(self.actor_module)
-            log_gpu_memory_usage("After load actor params during generate_sequences", logger=logger)
         prompts.batch = prompts.batch.cuda()
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
@@ -490,9 +712,64 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         output = output.to("cpu")
+
         # clear kv cache
         torch.cuda.empty_cache()
         return output
+
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @GPUMemoryLogger(role="generate_sequences_sperated", logger=logger)
+    def generate_sequences_sperated(self, prompts: DataProto):
+        assert self._is_rollout
+        prompts.batch = prompts.batch.cuda()
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+
+        with self.sharding_manager:
+            log_gpu_memory_usage("After entering sharding manager", logger=logger)
+
+            # (zhangchi.usc1992) wake up kv cache here. Currently only support vllm.
+            # Will support sglang once separate wakeup of model weights and kv cache is supported
+            # This API should be exposed by the rollout. Will rewrite this part when we refactor after v0.4 release.
+            # Currently, we hack here to support running large models (QWen3-236b and DeepSeek-671b)
+            if self.config.rollout.name == "vllm":
+                import inspect
+
+                if "tags" in inspect.signature(self.rollout.inference_engine.wake_up).parameters:
+                    self.rollout.inference_engine.wake_up(tags=["kv_cache"])
+
+            prompts = self.sharding_manager.preprocess_data(prompts)
+            output = self.rollout.generate_sequences(prompts=prompts)
+            output = self.sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        # clear kv cache
+        torch.cuda.empty_cache()
+        return output
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL, blocking=False)
+    @GPUMemoryLogger(role="async_generate_sequences", logger=logger)
+    async def async_generate_sequences(self, input_queue, output_queue):
+        """
+        This is a async version of generate_sequences, used for testing.
+        """
+        # loop = asyncio.get_event_loop()
+        # return loop.run_until_complete(self.generate_sequences(prompts))
+        
+        async def _async_generate(input_queue, output_queue):
+            prompts = input_queue.get()
+            # print(f"async_generate_sequences before get prompts from input_queue:{input_queue.qsize()}")
+            output = self.generate_sequences(prompts)
+            # print(f"async_generate_sequences after get prompts from input_queue:{input_queue.qsize()}")
+            output_queue.put(output)
+            # print(f"async_generate_sequences after put output to output_queue:{output_queue.qsize()}")
+        # asyncio.run(_async_generate(input_queue, output_queue))
+        await _async_generate(input_queue, output_queue)
 
     @register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
@@ -513,6 +790,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
+
         torch.cuda.empty_cache()
         return output
 
@@ -520,6 +798,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
+        
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
             log_gpu_memory_usage("After load actor params and grad during compute_log_prob", logger=logger)
@@ -904,7 +1183,7 @@ class RewardModelWorker(MegatronWorker):
             importlib.import_module(self.config.model.external_lib)
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
         override_transformer_config = OmegaConf.to_container(self.config.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
-
+        
         use_shm = self.config.model.get("use_shm", False)
         sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
         sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
@@ -913,7 +1192,7 @@ class RewardModelWorker(MegatronWorker):
         if rm_tokenizer_path is not None:
             rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
             rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path, trust_remote_code=self.config.model.get("trust_remote_code", False))
-
+        
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 

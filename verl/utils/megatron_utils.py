@@ -758,7 +758,11 @@ def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, m
     return infer_params
 
 
-def per_tensor_generator(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True):
+def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True, target_device=None, bucket_size_mb=100):
+    """
+    按bucket粒度进行通信的per_tensor_generator，返回bucket粒度的迭代器
+    每个bucket包含多个tensor，减少分布式通信次数
+    """
     from megatron.core import parallel_state as mpu
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
@@ -769,6 +773,202 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
     vpp_size = len(actor_module)
     all_gather_group = mpu.get_tensor_model_parallel_group()
     all_gather_group_size = torch.distributed.get_world_size(group=all_gather_group)
+
+    if target_device is None:
+        target_device = torch.cuda.current_device()
+    else:
+        target_device = torch.device(target_device)
+
+    def to_device(tensor):
+        if tensor is None:
+            return None
+        if isinstance(tensor, list):
+            return [t.to(target_device) for t in tensor]
+        return tensor.to(target_device)
+
+    def tensor_generator():
+        for scan_vpp_idx in range(vpp_size):
+            existing_keys = set()
+            model = unwrap_model(actor_module[scan_vpp_idx])
+            for name, param in model.named_parameters():
+                existing_keys.add(name)
+                yield name, param
+            extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
+            for name in extra_keys:
+                yield name, model.state_dict()[name].to(torch.cuda.current_device())
+
+    def calculate_tensor_size(tensor):
+        """计算tensor的大小（字节）"""
+        if tensor is None:
+            return 0
+        return tensor.numel() * tensor.element_size()
+
+    # 第一步：收集所有tensor的元信息
+    meta_info = []
+    for scan_vpp_idx in range(vpp_size):
+        existing_keys = set()
+        model = unwrap_model(actor_module[scan_vpp_idx])
+        for idx, (name, _) in enumerate(model.named_parameters()):
+            existing_keys.add(name)
+            meta_info.append((pp_rank, scan_vpp_idx, idx, name))
+        extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
+        for name in extra_keys:
+            meta_info.append((pp_rank, scan_vpp_idx, idx, name))
+
+    obj_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
+    torch.distributed.all_gather_object(object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group())
+    layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
+
+    # 第二步：按bucket分组tensor
+    bucket_size_bytes = bucket_size_mb * 1024 * 1024  # 转换为字节
+    buckets = []
+    current_bucket = []
+    current_bucket_size = 0
+    
+    gen_func = tensor_generator()
+    
+    for cur_pp_rank, scan_vpp_idx, idx, name in layer_list_meta:
+        if model_config.tie_word_embeddings and ("output_layers" in name):
+            import warnings
+
+            warnings.warn("Current model sharing word and embedding weights, skip output layer conversion", stacklevel=2)
+            continue
+
+        if cur_pp_rank == pp_rank:
+            try:
+                cur_name, cur_tensor = next(gen_func)
+            except StopIteration:
+                cur_name, cur_tensor = None, None
+            cur_name = normalize_model_name(name, cur_pp_rank, scan_vpp_idx, transformer_config)
+        else:
+            cur_tensor, cur_name = None, None
+
+        # 修复参数名
+        while cur_name.startswith("module."):
+            cur_name = cur_name[len("module.") :]
+
+        # 计算tensor大小
+        tensor_size = calculate_tensor_size(cur_tensor)
+        
+        # 如果当前bucket已经足够大，或者添加这个tensor会超过bucket大小，创建新bucket
+        if current_bucket_size + tensor_size > bucket_size_bytes and current_bucket:
+            buckets.append(current_bucket)
+            current_bucket = []
+            current_bucket_size = 0
+        
+        current_bucket.append((cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor))
+        current_bucket_size += tensor_size
+
+    # 添加最后一个bucket
+    if current_bucket:
+        buckets.append(current_bucket)
+
+    # print(f"[per_tensor_generator_bucketed] Created {len(buckets)} buckets with target size {bucket_size_mb}MB")
+
+    # 第三步：按bucket进行批量通信，返回bucket粒度的迭代器
+    for bucket_idx, bucket in enumerate(buckets):
+        # print(f"[per_tensor_generator_bucketed] Processing bucket {bucket_idx + 1}/{len(buckets)} with {len(bucket)} tensors")
+        
+        # 批量广播bucket中的所有tensor
+        bucket_names = []
+        bucket_tensors = []
+        
+        for cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor in bucket:
+            bucket_names.append(cur_name)
+            bucket_tensors.append(cur_tensor)
+        
+        # 批量广播名称
+        bucket_names_broadcasted = broadcast_str_from_megatron_pp(bucket_names)
+        
+        # 批量广播tensor（这里需要特殊处理，因为tensor可能在不同rank上）
+        bucket_tensors_broadcasted = []
+        
+        for i, (cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor) in enumerate(bucket):
+            if cur_tensor is not None:
+                # 如果tensor在当前rank上，广播给其他rank
+                broadcasted_tensor = broadcast_from_megatron_pp(cur_tensor)
+            else:
+                # 如果tensor不在当前rank上，接收广播
+                broadcasted_tensor = broadcast_from_megatron_pp(None)
+            
+            bucket_tensors_broadcasted.append(broadcasted_tensor)
+        
+        # 处理当前bucket的所有tensor，包括EP和TP逻辑
+        for name, broad_pp_tensor in zip(bucket_names_broadcasted, bucket_tensors_broadcasted):
+            if broad_pp_tensor is None:
+                continue
+                
+            # EP (Expert Parallel) 逻辑
+            if ".mlp.experts.linear_fc" in name and ep_size > 1:
+                num_experts = weight_converter.mcore_config.num_moe_experts
+                num_experts_per_rank = num_experts // ep_size
+                infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(ep_size)]
+                torch.distributed.all_gather(infer_params, broad_pp_tensor, group=ep_group)
+
+                name_prefix, local_expert_id = name.split(".weight")
+                local_expert_id = int(local_expert_id)
+                global_expert_ids = [num_experts_per_rank * ep_rank + local_expert_id for ep_rank in range(ep_size)]
+                global_expert_names = [f"{name_prefix}.weight{expert_id}" for expert_id in global_expert_ids]
+
+                for expert_name, param in zip(global_expert_names, infer_params):
+                    if etp_size > 1:
+                        # gather etp
+                        etp_params = [torch.empty_like(param) for _ in range(etp_size)]
+                        torch.distributed.all_gather(etp_params, param, group=etp_group)
+                        params = etp_params
+                    else:
+                        params = [param]
+
+                    merge_params = default_tp_concat_fn(layer_name_mapping, expert_name, broad_pp_tensor, params, model_config, convert_qkv_gate_up_by_simple_split)
+                    if not isinstance(merge_params, list):
+                        merge_params = [merge_params]
+                    converted_names, converted_params = weight_converter.convert_param(expert_name, merge_params)
+
+                    yield from zip(converted_names, to_device(converted_params))
+                continue
+
+            # TP (Tensor Parallel) 逻辑
+            if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
+                # allocate a new tensor with proper size
+                if all_gather_group_size <= 1:
+                    infer_params = [broad_pp_tensor]
+                else:
+                    infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
+                    torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
+                infer_params = default_tp_concat_fn(layer_name_mapping, name, broad_pp_tensor, infer_params, model_config, convert_qkv_gate_up_by_simple_split)
+            else:
+                infer_params = broad_pp_tensor
+
+            if not isinstance(infer_params, list):
+                infer_params = [infer_params]
+            converted_names, converted_params = weight_converter.convert_param(name, infer_params)
+
+            yield from zip(converted_names, to_device(converted_params))
+
+
+def per_tensor_generator(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True, target_device=None):
+    from megatron.core import parallel_state as mpu
+
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    etp_size = mpu.get_expert_tensor_parallel_world_size()
+    ep_group = mpu.get_expert_model_parallel_group()
+    etp_group = mpu.get_expert_tensor_parallel_group()
+    vpp_size = len(actor_module)
+    all_gather_group = mpu.get_tensor_model_parallel_group()
+    all_gather_group_size = torch.distributed.get_world_size(group=all_gather_group)
+
+    if target_device is None:
+        target_device = torch.cuda.current_device()
+    else:
+        target_device = torch.device(target_device)
+    
+    def to_device(tensor):
+        if tensor is None:
+            return None
+        if isinstance(tensor, list):
+            return [t.to(target_device) for t in tensor]
+        return tensor.to(target_device)
 
     def tensor_generator():
         for scan_vpp_idx in range(vpp_size):
@@ -854,7 +1054,7 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
                     merge_params = [merge_params]
                 converted_names, converted_params = weight_converter.convert_param(name, merge_params)
 
-                yield from zip(converted_names, converted_params)
+                yield from zip(converted_names, to_device(converted_params))
             continue
 
         # tp all gather
@@ -873,7 +1073,7 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
             infer_params = [infer_params]
         converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
 
-        yield from zip(converted_names, converted_params)
+        yield from zip(converted_names, to_device(converted_params))
 
 
 def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConfig):

@@ -17,8 +17,10 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import hydra
 import ray
+import time
 
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.ray_async_pipeline_trainer import RayPPOAsyncPipelineTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
 
@@ -97,19 +99,73 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
-            Role.Critic: ray.remote(CriticWorker),
-        }
+        if config.trainer.get("async_pipeline", False):
+            role_worker_mapping = {
+                Role.Actor: ray.remote(actor_rollout_cls),
+                Role.RefPolicy: ray.remote(actor_rollout_cls),
+                Role.Rollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
 
-        global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
-        mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
-        }
+            global_pool_id = "global_pool"
+            # resource_pool_spec = {
+            #     global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            # }
+            actor_pool_id = "actor_pool"
+            ref_pool_id = "ref_pool"
+            rollout_pool_id = "rollout_pool"
+            # actor_pool_size = config.trainer.n_gpus_per_node * config.trainer.nnodes // 2
+            # 2x8 
+            # 0.25 0.25 0.5 -> 4+4+8
+            # [4], [4], [8]
+            # 
+            actor_pool_size = int(config.actor_rollout_ref.actor.use_nodes * config.trainer.n_gpus_per_node * config.trainer.nnodes)
+            ref_pool_size = int(config.actor_rollout_ref.ref.use_nodes * config.trainer.n_gpus_per_node * config.trainer.nnodes)
+            rollout_pool_size = int(config.actor_rollout_ref.rollout.use_nodes * config.trainer.n_gpus_per_node * config.trainer.nnodes)
+            def gen_pool_spec(pool_size):
+                """Generate a pool spec for the given pool size."""
+                nper_node = config.trainer.n_gpus_per_node
+                pool_nodes = pool_size // nper_node
+                if pool_nodes > 0 and pool_size != nper_node * pool_nodes:
+                    raise ValueError(f"Pool size {pool_size} must be a multiple of n_gpus_per_node {nper_node}. \
+                        or this setting will get poor performance.")
+                return [config.trainer.n_gpus_per_node] * pool_nodes if pool_nodes > 1 else [pool_size]
+        
+            # TODO: check hybrid actor/ref
+            hybrid_actor_ref = actor_pool_size == ref_pool_size
+
+            resource_pool_spec = {
+                # TODO: node size;
+                actor_pool_id: gen_pool_spec(actor_pool_size),
+                rollout_pool_id: gen_pool_spec(rollout_pool_size),
+            }
+            if hybrid_actor_ref:
+                ref_pool_id = actor_pool_id
+            else:
+                resource_pool_spec[ref_pool_id] = gen_pool_spec(ref_pool_size)
+
+            print(f"Using resource pool spec: {resource_pool_spec}")
+
+            mapping = {
+                Role.Actor: actor_pool_id,
+                Role.RefPolicy: ref_pool_id,
+                Role.Rollout: rollout_pool_id,
+                Role.Critic: actor_pool_id,
+            }
+        else:
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
+
+            global_pool_id = "global_pool"
+            resource_pool_spec = {
+                global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            }
+            mapping = {
+                Role.ActorRollout: global_pool_id,
+                Role.Critic: global_pool_id,
+            }
 
         # we should adopt a multi-source reward function here
         # - for rule-based rm, we directly call a reward score
@@ -130,7 +186,8 @@ class TaskRunner:
         # use reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-            mapping[Role.RefPolicy] = global_pool_id
+            if Role.RefPolicy not in mapping:
+                mapping[Role.RefPolicy] = global_pool_id
 
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
@@ -141,7 +198,13 @@ class TaskRunner:
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
-        trainer = RayPPOTrainer(
+        
+        ppo_trainer_class = RayPPOAsyncPipelineTrainer if config.trainer.get("async_pipeline", False) else RayPPOTrainer
+        if hasattr(ppo_trainer_class, '__name__'):
+            print(f"Using PPO trainer class: {ppo_trainer_class.__name__}")
+        else:
+            print(f"Using PPO trainer class: {ppo_trainer_class}")
+        trainer = ppo_trainer_class(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
@@ -156,8 +219,13 @@ class TaskRunner:
             train_sampler=train_sampler,
             device_name=config.trainer.device,
         )
+        print(f"Using PPO trainer init_workers")
+        t1 = time.time()
         trainer.init_workers()
+        t2 = time.time()
+        print(f"Using PPO trainer init_workers done cost:{t2 - t1}s, start training")
         trainer.fit()
+        print(f"Using PPO trainer fit done")
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):

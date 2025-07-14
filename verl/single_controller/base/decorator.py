@@ -389,7 +389,6 @@ def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
     splitted_args_with_func = [[args[0]] * worker_group.world_size] + splitted_args
     return splitted_args_with_func, splitted_kwargs
 
-
 def collect_dp_compute_data_proto(worker_group, output):
     import ray
 

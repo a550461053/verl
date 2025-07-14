@@ -16,6 +16,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 import ray
+import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -106,9 +107,15 @@ class RayGRPOTrainer(RayPPOTrainer):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
+                            t1 = time.time()
                             self.async_rollout_manager.wake_up()
+                            t2 = time.time()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            t3 = time.time()
                             self.async_rollout_manager.sleep()
+                            t4 = time.time()
+                            print(f"engine wake_up:{t2 - t1}, generate:{t3 - t2}, sleep:{t4 - t3}s")
+                            
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
