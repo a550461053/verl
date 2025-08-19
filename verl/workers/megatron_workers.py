@@ -150,7 +150,6 @@ class ActorRolloutRefWorker(MegatronWorker):
                 return self.config.ref.megatron.seed
             return 42
 
-        # 分离架构判断
         self._is_sperated_arch = not (self._is_actor and self._is_rollout)
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
@@ -162,26 +161,25 @@ class ActorRolloutRefWorker(MegatronWorker):
         if not torch.distributed.is_initialized():
             rank = int(os.environ["LOCAL_RANK"])
             from datetime import timedelta
-            timeout_second = 3600
-            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=timeout_second))
+            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=3600))
 
             torch.cuda.set_device(rank)
 
             if enable_megatron_sequence_parallel():
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
             mpu.initialize_model_parallel(
-                tensor_model_parallel_size=tp(), #self.config.actor.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=pp(), #self.config.actor.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=vpp(), #self.config.actor.megatron.virtual_pipeline_model_parallel_size,
+                tensor_model_parallel_size=tp(),
+                pipeline_model_parallel_size=pp(),
+                virtual_pipeline_model_parallel_size=vpp(),
                 pipeline_model_parallel_split_rank=None,
                 use_sharp=False,
-                context_parallel_size=cp(), #self.config.actor.megatron.context_parallel_size,
-                expert_model_parallel_size=ep(), #self.config.actor.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=etp(), #self.config.actor.megatron.expert_tensor_parallel_size,
+                context_parallel_size=cp(),
+                expert_model_parallel_size=ep(),
+                expert_tensor_parallel_size=etp(),
                 nccl_communicator_config_path=None,
             )
 
-        set_random_seed(seed=seed()) #self.config.actor.megatron.seed)
+        set_random_seed(seed=seed())
 
         # normalize config
         if (self._is_actor and self._is_rollout) or (self._is_actor and self._is_sperated_arch):

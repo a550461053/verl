@@ -41,7 +41,6 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 
-# 从新的 pipeline 模块导入
 from verl.trainer.ppo.pipeline import (
     AsyncPipeline,
     enhanced_print,
@@ -210,12 +209,11 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             col_name = "actor_rollout_sync"
             col_ranks = list(range(col_size))
             
-            # 根据配置选择通信方式
             comm_type = getattr(self.config.actor_rollout_ref, "comm_type", "ray")  # "ray" or "pytorch"
             backend = getattr(self.config.actor_rollout_ref, "comm_backend", "nccl")    # "nccl" or "gloo"
             
             if comm_type == "ray":
-                # 使用Ray Collective（支持NCCL）
+                # use Ray Collective (support NCCL)
                 import ray.util.collective as col
                 col.create_collective_group(
                     actors=members,
@@ -226,12 +224,12 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 )
                 print(f"Created Ray Collective {backend.upper()} group: {col_name}")
             elif comm_type == "pytorch":
-                # 使用PyTorch distributed，不需要Ray Collective初始化
+                # use PyTorch distributed, no need to initialize Ray Collective
                 print(f"Using PyTorch {backend} backend, skipping Ray Collective initialization")
             else:
                 print(f"Unsupported comm_type: {comm_type}")
             
-            # 设置worker的通信配置
+            # setup worker communication config
             actor_len = len(self.actor_wg.workers)
             self.actor_wg.setup_for_ray_col(0, col_size, col_name, backend)
             if actor_len != col_size:
@@ -281,7 +279,7 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
         metrics.update(global_balance_stats)
 
     async def sync_weight(self, sync_thread=False):
-        """同步权重到所有worker"""
+        """sync weights to all workers"""
         if sync_thread:
             self.actor_wg.sync_per_tensor_generator()
             ray.get(self.rollout_wg.sync_per_tensor_generator())
@@ -291,11 +289,10 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
 
     async def rollout(self):
-        """执行rollout逻辑"""
+        """rollout"""
         while True:
-            # 模拟rollout逻辑
             print("Performing rollout...")
-            await asyncio.sleep(1)  # 模拟异步操作
+            await asyncio.sleep(1)
 
     def _pre_process_batch(self, batch: DataProto):
         # pop those keys for generation
@@ -327,7 +324,7 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 # self.global_steps += 1
                 self.dataloader_global_step += 1
                 yield self.dataloader_global_step, gen_batch, batch_dict
-        yield -1, PIPELINE_END_SIGNAL, PIPELINE_END_SIGNAL  # 用于标识数据流结束
+        yield -1, PIPELINE_END_SIGNAL, PIPELINE_END_SIGNAL
             
     async def dataloader_loop(self):
         
@@ -341,23 +338,17 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 cur_queue = self._async_pipeline.get_cur_queue(src_role="train", dst_role="rollout")
                 
                 if cur_queue.qsize() >= max_pending_size:
-                    # print(f"Current queue size {cur_queue.qsize()} is greater than or equal to max_pending_size {max_pending_size}. Waiting...")
-                    # 等待一段时间后再继续
                     await asyncio.sleep(1)
                     continue
-                
-                # 获取下一个批次
-                # gen_batch = await asyncio.get_event_loop().run_in_executor(None, self.get_next_batch)
+
                 cur_global_steps, gen_batch, batch_dict = next(dataloader_batch_iter)
                 if gen_batch == PIPELINE_END_SIGNAL:
                     print("dataloader loop finished.")
                     await self._async_pipeline.push(src_role="dataloader", dst_role="train", data=PIPELINE_END_SIGNAL)
                     break
                 
-                # 将训练的批次放入训练队列
                 await self._async_pipeline.push(src_role="dataloader", dst_role="train", data=(cur_global_steps, batch_dict))
                 
-                # 将生成的批次放入训练队列
                 await self._async_pipeline.push(src_role="train", dst_role="rollout", data=(cur_global_steps, gen_batch))
 
                 next_queue = self._async_pipeline.get_cur_queue(src_role="train", dst_role="rollout")
@@ -367,7 +358,6 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
     async def rollout_generate(self):
         
         while True:
-            t1 = time.time()
             _is_complete = self._async_pipeline.is_complete(src_role="rollout", dst_role="train")
             if _is_complete:
                 print(f"[rollout] Pipeline is complete, exiting rollout_generate.")
@@ -385,48 +375,20 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             step, gen_batch = await self._async_pipeline.pull(src_role="train", dst_role="rollout")
 
             next_queue = self._async_pipeline.get_cur_queue(src_role="rollout", dst_role="train")
-            
-            t2 = time.time()
-            # rollout
-            print(f"[rollout] Step {step}: Generating sequences, Next queue size: {next_queue.qsize()}")
-            # generate_task = asyncio.create_task(self.rollout_wg.async_generate_sequences(gen_batch))
-            # 等待生成完成
-            # gen_batch_output = await generate_task
-            
-            # 使用线程池执行同步操作
+
             gen_batch_output = await asyncio.to_thread(self.rollout_wg.generate_sequences, gen_batch)
-
-            # gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)
-
-            t3 = time.time()
-            # # 后处理后的批次
-            # batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-            # # repeat to align with repeated responses in rollout
-            # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-            # batch = batch.union(gen_batch_output)
 
             print(f"[rollout] Sending rollout data to train queue, Next queue size: {next_queue.qsize()}")
             await self._async_pipeline.push(src_role="rollout", dst_role="train", data=gen_batch_output)
             self.generate_global_step += 1
             await self._async_pipeline.push(src_role="rollout", dst_role="param_update", data=self.generate_global_step)
             
-            t4 = time.time()
-            
-            print(f"[rollout] Step {step}: Sent rollout data to train queue size: {next_queue.qsize()}. Time taken: {t4 - t1:.2f}s (pull: {t2 - t1:.2f}s, generate: {t3 - t2:.2f}s, push: {t4 - t3:.2f}s)")
+            print(f"[rollout] Step {step}: Sent rollout data to train queue size: {next_queue.qsize()}")
 
 
     async def rollout_mock(self, mock_data=True):
         for step in range(5):
             print(f"Waiting for training data in the queue...")
-            # 获取训练批次
-            # train_data = await self.train_to_rollout_queue.get()
-            # if type(self.train_to_rollout_queue) is asyncio.Queue:
-            #     train_data = self.train_to_rollout_queue.get()
-            # else:
-            #     # ray.util.queue.Queue.get() 是 同步阻塞调用，而你的 rollout_mock 是一个 async 协程。
-            #     # 一旦在 async 协程里执行了同步阻塞函数，事件循环线程就会被卡住
-            #     train_data = await self.train_to_rollout_queue.get_async()
-            
             train_data = await self._async_pipeline.pull(src_role="train", dst_role="rollout")
             print(f"[Rollout] Step {step + 1}: Received rollout data from train queue")
             
@@ -434,9 +396,9 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             if mock_data:
                 # # rollout_data = self.rollout_wg.generate_sequences(train_data)
                 rollout_data = {
-                    "responses": torch.randint(0, 2, (8, 10)),  # 模拟生成的响应
-                    "prompts": train_data["input_ids"],  # 使用训练数据的输入作为提示
-                    "scores": torch.rand(8),  # 模拟分数
+                    "responses": torch.randint(0, 2, (8, 10)),  # mock generated responses
+                    "prompts": train_data["input_ids"],  # use training data input as prompts
+                    "scores": torch.rand(8),  # mock scores
                 }
                 
             else:
@@ -451,22 +413,11 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 
                 rollout_data = self.rollout_wg.generate_sequences(train_data)
             
-            
-            # 模拟等待一段时间
-            # await asyncio.sleep(1)
-            
-            # 将rollout结果放入队列
             print(f"[Rollout] Step {step + 1}: Sending rollout data to train queue")
-            # await self.rollout_to_train_queue.put(rollout_data)
-            # self.rollout_to_train_queue.put(rollout_data)
             await self._async_pipeline.push(src_role="rollout", dst_role="train", data=rollout_data)
 
     async def rollout_logp(self):
-        """执行rollout逻辑"""
-        # while True:
-        #     # 模拟rollout逻辑
-        #     print("Performing rollout logp...")
-        #     await asyncio.sleep(1)
+        """rollout logp"""
         
         while True:
             _is_complete = self._async_pipeline.is_complete(src_role="logp", dst_role="train")
@@ -484,11 +435,7 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
 
     async def rollout_ref_logp(self):
-        """执行rollout逻辑"""
-        # while True:
-        #     # 模拟rollout逻辑
-        #     print("Performing rollout ref logp...")
-        #     await asyncio.sleep(1)
+        """rollout ref logp"""
         
         if not self.use_reference_policy:
             return
@@ -520,16 +467,15 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             #         batch = batch.union(ref_log_prob)
 
     async def rollout_reward_fn(self):
-        """执行rollout逻辑"""
+        """rollout-reward-fn"""
         while True:
             _is_complete = self._async_pipeline.is_complete(src_role="reward", dst_role="train")
             if _is_complete:
                 print(f"[Reward] Pipeline is complete, exiting rollout_reward_fn.")
                 break
-        
-            t1 = time.time()
+
             batch = await self._async_pipeline.pull(src_role="train", dst_role="reward")
-            t2 = time.time()
+
             # with _timer("reward", timing_raw):
             # compute reward model score
             if self.use_rm:
@@ -542,34 +488,31 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
             else:
                 reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-            t3 = time.time()
+            
             # push to the train queue
             await self._async_pipeline.push(src_role="reward", dst_role="train", data=(reward_tensor, reward_extra_infos_dict))
-            t4 = time.time()
-            # [Rollout Reward Fn] Step 1: Sent reward to train queue. Time taken: 445.75s (pull: 340.98s, compute: 3.00s, push: 101.77s) 
-            print(f"[Reward] Step {self.global_steps}: Sent reward to train queue. Time taken: {t4 - t1:.2f}s (pull: {t2 - t1:.2f}s, compute: {t3 - t2:.2f}s, push: {t4 - t3:.2f}s)")
+            
+            print(f"[Reward] Step {self.global_steps}: Sent reward to train queue.")
 
     async def param_update_loop(self):
-        """参数更新循环"""
+        """param update loop"""
         while True:
             _is_complete = self._async_pipeline.is_complete(src_role="param_update", dst_role="train")
             if _is_complete:
                 print(f"[Param Update] Pipeline is complete, exiting param_update_loop.")
                 break
             
-            # 等待参数更新：train-step-done -> syncing -> done
+            # wait for param update: train-step-done -> syncing -> done
             model_step = await self._async_pipeline.pull(src_role="train", dst_role="param_update")
             rollout_step = await self._async_pipeline.pull(src_role="rollout", dst_role="param_update")
             
             print(f"[Param Update] Received model step: {model_step}, rollout step: {rollout_step}")
             if model_step <= rollout_step:
-                # 同步权重到所有worker
+                # sync weights to all workers
                 await self.sync_weight()
             
             # await self._async_pipeline.push(src_role="param_update", dst_role="train", data=model_step)
             await self._async_pipeline.push(src_role="param_update", dst_role="rollout", data=model_step)
-            
-            # 更新参数
             print(f"[Param Update] step:{model_step} Parameters updated.")
             
     async def train_loop(self):
@@ -609,17 +552,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
         self.global_steps += 1
         last_val_metrics = None
 
-        # 创建生产者的batches，用于进行异步pipeline的数据流构建
-        # 这里的生产者是train_loop的主线程
-        # 1. 创建一个生产者batches，先进行rollout的输入
-        # 2. rollout结束之后进入下一个batch的生成
-        # 3. 此时，train用上一个batches进行训练，从而实现overlap
-        # warmup一次；
         await self._async_pipeline.push(src_role="train", dst_role="dataloader", data=PIPELINE_START_SINGLE)
-        # dataloader_batch_iter = self.get_next_batch()
-        # dataloader_batches = next(dataloader_batch_iter)
-        # await self._async_pipeline.push(src_role="train", dst_role="rollout", data=dataloader_batches)
-        
+
         
         # for epoch in range(self.config.trainer.total_epochs):
         #     for batch_dict in self.train_dataloader:
@@ -631,7 +565,7 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 # async get batch from the dataloader
                 cur_global_steps, batch_dict = await self._async_pipeline.pull(src_role="dataloader", dst_role="train")
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                # 需要重复执行预处理部分、
+                # need to repeat pre-process part
                 _gen_batch = self._pre_process_batch(batch)
                 
                 is_last_step = self.global_steps >= self.total_training_steps
@@ -863,24 +797,26 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
     async def train_mock(self):
         for step in range(5):
-            # 模拟训练逻辑
+            # mock training logic
             train_batch = {
-                "input_ids": torch.randint(0, 2, (8, 10)),  # 模拟输入
-                "labels": torch.randint(0, 2, (8, 10))  # 模拟标签
+                "input_ids": torch.randint(0, 2, (8, 10)),  # mock input
+                "labels": torch.randint(0, 2, (8, 10))  # mock label
             }
             print(f"[Training] Step {step + 1}: Sending batch to rollout queue")
 
             await self._async_pipeline.push('train', 'rollout', train_batch)
             
-            # 模拟等待一段时间
+            # mock wait for a while
             await asyncio.sleep(1)
             
-            # 模拟从rollout队列获取结果
+            # mock get result from rollout queue
             result = await self._async_pipeline.pull('rollout', 'train')
             print(f"[Training] Step {step + 1}: Received result from rollout queue: {result}")
             
     async def fit_async(self):
-        """异步执行rollout和train，简单但增加overlap等逻辑容易混乱，已废弃（切换至状态机的task-loop）"""
+        """
+        async execute rollout and train, simple but easy to confuse with overlap logic, deprecated (switch to state machine task-loop)
+        """
         await asyncio.gather(
             # 1. dataloader_loop
             # 2. train_loop get batch from dataloader_loop
@@ -900,12 +836,12 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
     def fit(self, use_blocking_mode=False):
         """
-        同步入口，启动异步任务
+        sync entry, start async tasks
         
         Args:
-            use_blocking_mode: 是否使用阻塞模式（默认False）
-                              True: 使用同步模式，走nccl做同步(因为受限于线程安全，无法做异步参数同步，所以废弃)
-                              False: 使用纯异步模式，走cpu做异步参数同步
+            use_blocking_mode: whether to use blocking mode (default False)
+                              True: use sync mode, use nccl for sync (because of thread safety, cannot do async parameter sync, so deprecated)
+                              False: use pure async mode, use cpu for async parameter sync
         """
         mode_name = "blocking" if use_blocking_mode else "async"
         print(f"Starting async fit with {mode_name} mode...")

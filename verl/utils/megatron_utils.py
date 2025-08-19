@@ -760,8 +760,8 @@ def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, m
 
 def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True, target_device=None, bucket_size_mb=100):
     """
-    按bucket粒度进行通信的per_tensor_generator，返回bucket粒度的迭代器
-    每个bucket包含多个tensor，减少分布式通信次数
+    per_tensor_generator with bucket size, return bucket-level iterator
+    each bucket contains multiple tensors, reduce distributed communication times
     """
     from megatron.core import parallel_state as mpu
 
@@ -798,12 +798,12 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
                 yield name, model.state_dict()[name].to(torch.cuda.current_device())
 
     def calculate_tensor_size(tensor):
-        """计算tensor的大小（字节）"""
+        """calculate tensor size (bytes)"""
         if tensor is None:
             return 0
         return tensor.numel() * tensor.element_size()
 
-    # 第一步：收集所有tensor的元信息
+    # step 1: collect all tensor meta info
     meta_info = []
     for scan_vpp_idx in range(vpp_size):
         existing_keys = set()
@@ -819,8 +819,8 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
     torch.distributed.all_gather_object(object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group())
     layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
 
-    # 第二步：按bucket分组tensor
-    bucket_size_bytes = bucket_size_mb * 1024 * 1024  # 转换为字节
+    # step 2: group tensors by bucket
+    bucket_size_bytes = bucket_size_mb * 1024 * 1024  # convert to bytes
     buckets = []
     current_bucket = []
     current_bucket_size = 0
@@ -843,14 +843,14 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
         else:
             cur_tensor, cur_name = None, None
 
-        # 修复参数名
+        # fix parameter name
         while cur_name.startswith("module."):
             cur_name = cur_name[len("module.") :]
 
-        # 计算tensor大小
+        # calculate tensor size
         tensor_size = calculate_tensor_size(cur_tensor)
         
-        # 如果当前bucket已经足够大，或者添加这个tensor会超过bucket大小，创建新bucket
+        # if current bucket is already large enough, or adding this tensor will exceed bucket size, create new bucket
         if current_bucket_size + tensor_size > bucket_size_bytes and current_bucket:
             buckets.append(current_bucket)
             current_bucket = []
@@ -859,17 +859,13 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
         current_bucket.append((cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor))
         current_bucket_size += tensor_size
 
-    # 添加最后一个bucket
+    # add last bucket
     if current_bucket:
         buckets.append(current_bucket)
 
-    # print(f"[per_tensor_generator_bucketed] Created {len(buckets)} buckets with target size {bucket_size_mb}MB")
-
-    # 第三步：按bucket进行批量通信，返回bucket粒度的迭代器
+    # step 3: batch broadcast tensors by bucket, return bucket-level iterator
     for bucket_idx, bucket in enumerate(buckets):
-        # print(f"[per_tensor_generator_bucketed] Processing bucket {bucket_idx + 1}/{len(buckets)} with {len(bucket)} tensors")
-        
-        # 批量广播bucket中的所有tensor
+        # batch broadcast all tensors in bucket
         bucket_names = []
         bucket_tensors = []
         
@@ -877,28 +873,28 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
             bucket_names.append(cur_name)
             bucket_tensors.append(cur_tensor)
         
-        # 批量广播名称
+        # batch broadcast names
         bucket_names_broadcasted = broadcast_str_from_megatron_pp(bucket_names)
         
-        # 批量广播tensor（这里需要特殊处理，因为tensor可能在不同rank上）
+        # batch broadcast tensors (need special handling because tensors may be on different ranks)
         bucket_tensors_broadcasted = []
         
         for i, (cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor) in enumerate(bucket):
             if cur_tensor is not None:
-                # 如果tensor在当前rank上，广播给其他rank
+                # if tensor is on current rank, broadcast to other ranks
                 broadcasted_tensor = broadcast_from_megatron_pp(cur_tensor)
             else:
-                # 如果tensor不在当前rank上，接收广播
+                # if tensor is not on current rank, receive broadcast
                 broadcasted_tensor = broadcast_from_megatron_pp(None)
             
             bucket_tensors_broadcasted.append(broadcasted_tensor)
-        
-        # 处理当前bucket的所有tensor，包括EP和TP逻辑
+
+        # process all tensors in current bucket, including EP and TP logic
         for name, broad_pp_tensor in zip(bucket_names_broadcasted, bucket_tensors_broadcasted):
             if broad_pp_tensor is None:
                 continue
                 
-            # EP (Expert Parallel) 逻辑
+            # EP (Expert Parallel) logic
             if ".mlp.experts.linear_fc" in name and ep_size > 1:
                 num_experts = weight_converter.mcore_config.num_moe_experts
                 num_experts_per_rank = num_experts // ep_size
@@ -927,7 +923,7 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
                     yield from zip(converted_names, to_device(converted_params))
                 continue
 
-            # TP (Tensor Parallel) 逻辑
+            # TP (Tensor Parallel) logic
             if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
                 # allocate a new tensor with proper size
                 if all_gather_group_size <= 1:

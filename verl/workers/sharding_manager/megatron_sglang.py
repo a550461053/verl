@@ -229,8 +229,7 @@ class MegatronSGLangAsyncShardingManager(MegatronSGLangShardingManager):
             torch.cuda.set_rng_state(self.torch_random_states)
         else:
             self.gen_random_states = None
-        
-        # 添加dual_buffer_engine属性
+
         self.dual_buffer_engine = None
         if hasattr(inference_engine, 'update_buffer_data_only'):
             self.dual_buffer_engine = inference_engine

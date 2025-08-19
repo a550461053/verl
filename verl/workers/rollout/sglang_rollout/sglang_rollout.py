@@ -79,8 +79,6 @@ from verl.workers.rollout.schemas import (
 )
 from verl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
 
-# 使用Gloo后不需要复杂的kernel调度
-
 try:
     from sglang.srt.function_call.function_call_parser import FunctionCallParser
 except ImportError:
@@ -196,79 +194,26 @@ def _pre_process_inputs(
     return token_ids
 
 
-def _post_process_outputs(tokenizer, output, device=None):
+def _post_process_outputs(tokenizer, output):
     def _map_each_response(resp):
         output_token_logprobs = resp["meta_info"]["output_token_logprobs"]
-        
-        # 检查 output_token_logprobs 是否为空
-        if not output_token_logprobs:
-            print(f"[_post_process_outputs] Warning: output_token_logprobs is empty")
-            # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-            empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-            return empty_tensor, empty_tensor
-        
-        try:
-            log_probs, output_token_ids = zip(*[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs])
-            # 检查是否有有效的token_ids和log_probs
-            if not output_token_ids or not log_probs:
-                print(f"[_post_process_outputs] Warning: Empty output_token_ids or log_probs")
-                empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-                return empty_tensor, empty_tensor
-            return torch.tensor(output_token_ids), torch.tensor(log_probs)
-        except ValueError as e:
-            print(f"[_post_process_outputs] Error in _map_each_response: {e}")
-            print(f"[_post_process_outputs] output_token_logprobs length: {len(output_token_logprobs)}")
-            # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-            empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-            return empty_tensor, empty_tensor
+        log_probs, output_token_ids = zip(*[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs])
+        return torch.tensor(output_token_ids), torch.tensor(log_probs)
 
-    # 添加输入验证
-    if output is None:
-        print(f"[_post_process_outputs] Error: output is None")
-        # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-        return empty_tensor, empty_tensor
-    
-    if not isinstance(output, (list, tuple)) or len(output) == 0:
-        print(f"[_post_process_outputs] Error: output is not a valid list/tuple or is empty: {type(output)}")
-        # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-        return empty_tensor, empty_tensor
+    out_map = map(lambda x: _map_each_response(x), output)
+    batched_output_token_ids = []
+    batched_logprobs = []
+    for output_token_ids, log_probs in out_map:
+        # 检查tensor是否为空
+        if output_token_ids.numel() > 0:
+            batched_output_token_ids.append(output_token_ids)
+            batched_logprobs.append(log_probs)
 
-    try:
-        out_map = map(lambda x: _map_each_response(x), output)
-        batched_output_token_ids = []
-        batched_logprobs = []
-        for output_token_ids, log_probs in out_map:
-            # 检查tensor是否为空
-            if output_token_ids.numel() > 0:
-                batched_output_token_ids.append(output_token_ids)
-                batched_logprobs.append(log_probs)
-        
-        # 检查是否有有效的输出
-        if not batched_output_token_ids:
-            print(f"[_post_process_outputs] Warning: No valid outputs found")
-            pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-            # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-            empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-            return empty_tensor, empty_tensor
-        
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        batched_output_token_ids = pad_sequence(batched_output_token_ids, batch_first=True, padding_value=pad_token_id)
-        if len(batched_logprobs) > 0:
-            batched_logprobs = pad_sequence(batched_logprobs, batch_first=True, padding_value=pad_token_id)
-        return batched_output_token_ids, batched_logprobs
-    except Exception as e:
-        print(f"[_post_process_outputs] Error processing output: {e}")
-        print(f"[_post_process_outputs] Output type: {type(output)}")
-        print(f"[_post_process_outputs] Output length: {len(output) if hasattr(output, '__len__') else 'N/A'}")
-        # 返回形状为 [0, 0] 的tensor而不是空tensor，避免shape[1]错误
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        empty_tensor = torch.empty(0, 0, dtype=torch.long, device=device)
-        return empty_tensor, empty_tensor
-
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    batched_output_token_ids = pad_sequence(batched_output_token_ids, batch_first=True, padding_value=pad_token_id)
+    if len(batched_logprobs) > 0:
+        batched_logprobs = pad_sequence(batched_logprobs, batch_first=True, padding_value=pad_token_id)
+    return batched_output_token_ids, batched_logprobs
 
 def get_tool_call_parser_type(tokenizer: PreTrainedTokenizer) -> str:
     items = FunctionCallParser.ToolCallParserEnum.items()
@@ -434,7 +379,6 @@ class SGLangRollout(BaseRollout):
             
             if enable_dual_buffer:
                 print(f"[SGLangRollout] Initializing DualBufferAsyncEngine for dual buffer optimization")
-                # 导入独立的DualBufferAsyncEngine
                 from .dual_buffer_engine import DualBufferAsyncEngine
                 buffer_bucket_size_mb = getattr(self.config, 'param_update_consume_bucket_size_mb', 128)
                 self._engine = DualBufferAsyncEngine(
@@ -603,7 +547,6 @@ class SGLangRollout(BaseRollout):
                 self.sampling_params[key] = value
 
     def get_update_weight_func(self):
-        # 更新双buffer的权重
         update_func_call = self._engine.update_buffer_data_only if hasattr(self, '_engine') and self._engine is not None else None
         return update_func_call
 
@@ -800,7 +743,7 @@ class SGLangRollout(BaseRollout):
                 force_cpu_device=False,
             )
 
-            out = _post_process_outputs(self.tokenizer, output, device=idx.device)
+            out = _post_process_outputs(self.tokenizer, output)
 
             response = out[0].to("cpu", non_blocking=True)
             rollout_log_probs = out[1].to("cpu", non_blocking=True)
@@ -1363,26 +1306,9 @@ class SGLangRollout(BaseRollout):
         self.is_sleep = True
 
     def sync_per_tensor_generator(self):
-        """同步参数到SGLang引擎 - 确保参数更新生效"""        
-        # 检查是否有param_update_manager
         if hasattr(self, 'param_update_manager') and self.param_update_manager is not None:            
-            # 使用param_update_manager同步参数
             if hasattr(self.param_update_manager, 'sync_per_tensor_generator'):
                 result = self.param_update_manager.sync_per_tensor_generator()
                 print(f"[SGLangRollout] param_update_manager.sync_per_tensor_generator completed")
                 return result
 
-        # 如果没有可用的管理器，尝试直接更新引擎权重
-        if self._engine is not None and self._tp_rank == 0:
-            print(f"[SGLangRollout] No parameter manager available, attempting direct engine update")
-            
-            # 检查引擎类型
-            if hasattr(self._engine, 'update_weights_from_tensor'):
-                print(f"[SGLangRollout] Engine supports update_weights_from_tensor")
-                # 这里需要获取最新的权重，暂时返回None
-                return None
-            else:
-                print(f"[SGLangRollout] Engine does not support update_weights_from_tensor")
-        
-        print(f"[SGLangRollout] No parameter sync method available")
-        return None
