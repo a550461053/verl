@@ -294,16 +294,11 @@ class AsyncPipeline:
                 # Original method: compression + queue transfer
                 compress_start = time.time()
                 
-                # Compress data (if enabled)
-                if True: # Always compress for compressed mode
-                    optimized_data = self._compress_data(data)
-                else:
-                    optimized_data = data
-                
+                # Always compress for compressed mode
+                optimized_data = self._compress_data(data)
+
                 # Record compression completion time
                 compress_time = time.time() - compress_start
-                
-                # Record put_async start time
                 put_start = time.time()
                 
                 # Key analysis: put_async performance
@@ -312,7 +307,6 @@ class AsyncPipeline:
                 # Record put_async completion time
                 put_time = time.time() - put_start
                 
-                # Record total time
                 total_time = time.time() - compress_start
                 queue_size_after = cur_pipeline_queue.qsize()
                 
@@ -326,12 +320,10 @@ class AsyncPipeline:
             else: # RAY_QUEUE mode
                 # Original method: compression + queue transfer
                 compress_start = time.time()
-
                 # Always compress for ray queue mode
                 optimized_data = self._compress_data(data)
                 
                 compress_time = time.time() - compress_start
-                
                 put_start = time.time()
                 
                 await cur_pipeline_queue.put_async(optimized_data)
@@ -404,8 +396,7 @@ class AsyncPipeline:
         use_queue_name = f"{src_role}_to_{dst_role}"
         if debug_log:
             enhanced_print(dst_role, src_role, f"[{dst_role}] Pulling data from [{src_role}] queue: {use_queue_name}")
-        
-        # Record start time
+
         start_time = time.time()
         
         if self.transfer_mode == TransferMode.DIRECT_OBJECT_STORE:
@@ -415,7 +406,7 @@ class AsyncPipeline:
             
             # Wait for available object ref
             while not self._object_store_pairs[use_queue_name]:
-                await asyncio.sleep(0.001)  # 1ms wait
+                await asyncio.sleep(0.1)  # 100ms wait
             
             # Get first object ref
             object_ref = self._object_store_pairs[use_queue_name].pop(0)
@@ -466,10 +457,7 @@ class AsyncPipeline:
                     enhanced_print(dst_role, src_role, f"⚠️ SLOW RAY_GET: {use_queue_name} took {total_time:.2f}s (queue_get: {queue_get_time:.2f}s, ray_get: {ray_get_time:.2f}s)")
             elif self.transfer_mode == TransferMode.RAY_QUEUE_COMPRESSED:
                 # Original method: decompression processing
-                # Record get_async completion time
                 get_time = queue_get_time
-                
-                # Record decompression start time
                 decompress_start = time.time()
                 
                 # Process compressed data
@@ -484,11 +472,8 @@ class AsyncPipeline:
                 else:
                     # Original data
                     result = data
-                
-                # Record decompression completion time
+
                 decompress_time = time.time() - decompress_start
-                
-                # Record total time
                 total_time = time.time() - start_time
                 
                 # Detailed analysis of get_async performance
@@ -500,10 +485,7 @@ class AsyncPipeline:
                     enhanced_print(dst_role, src_role, f"⚠️ SLOW PULL: {use_queue_name} took {total_time:.2f}s (get_async: {get_time:.2f}s, decompress: {decompress_time:.2f}s)")
             else: # RAY_QUEUE mode
                 # Original method: decompression processing
-                # Record get_async completion time
                 get_time = queue_get_time
-                
-                # Record decompression start time
                 decompress_start = time.time()
                 
                 # Process compressed data
@@ -519,10 +501,7 @@ class AsyncPipeline:
                     # Original data
                     result = data
                 
-                # Record decompression completion time
                 decompress_time = time.time() - decompress_start
-                
-                # Record total time
                 total_time = time.time() - start_time
                 
                 # Detailed analysis of get_async performance

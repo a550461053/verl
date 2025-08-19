@@ -540,12 +540,10 @@ class ParamUpdateManager:
         
         enhanced_print("param_update", None, f"Async send: processing {len(groups)} buckets (version:{version}) with {len(global_tensor_map)} tensors")
         
-        # 处理每个bucket，按顺序发送
         success_count = 0
         for i, group in enumerate(groups):
             bucket_name = f"bucket_{i}"
             
-            # 从全局tensor_map中获取bucket需要的tensors
             bucket_tensors = []
             found_count = 0
             for meta in group:
@@ -559,7 +557,6 @@ class ParamUpdateManager:
                 enhanced_print("param_update", None, f"Async send: no tensors found for {bucket_name}")
                 continue
             
-            # 发送bucket，传入bucket_tensors而不是group
             success = self._async_send_bucket(bucket_tensors, 0, bucket_name, version=version)
             if success:
                 success_count += 1

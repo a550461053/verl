@@ -38,20 +38,20 @@ from .utils import (
 )
 
 __all__ = [
-    # Pipeline 工具类
+    # Pipeline utility classes
     "AsyncPipeline",
     "enhanced_print", 
     "PIPELINE_END_SIGNAL",
     "PIPELINE_START_SINGLE",
     "ROLE_COLORS",
     
-    # State Machine 基础框架
+    # State Machine basic framework
     "RoleState",
     "RoleEvent", 
     "BaseRoleStateMachine",
     "AsyncTrainingFlow",
     
-    # State Machine 实现
+    # State Machine implementation
     "DataloaderStateMachine",
     "TrainStateMachine",
     "RolloutStateMachine",
@@ -62,7 +62,7 @@ __all__ = [
     "GenerateStateMachine",
     "create_role_state_machine",
     
-    # 工具类
+    # Utility classes
     "ResourceLock",
     "TimingStatsCollector",
     "timing_decorator",

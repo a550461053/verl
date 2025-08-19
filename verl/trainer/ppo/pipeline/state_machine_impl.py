@@ -169,7 +169,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
         self._share_resources = trainer.config.trainer.get("share_resource_between_train_logp_ref_logp", True)
     
     async def get_input_data(self) -> Optional[Any]:
-        """阻塞获取 dataloader；等待 generate 数据到达"""
+        """Block getting dataloader; wait for generate data to arrive"""
         import asyncio
 
         data = await self.pipeline.pull("dataloader", "rollout")
@@ -177,7 +177,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
         if data == PIPELINE_END_SIGNAL:
             return "END"
         
-        # dataloader 数据到达，缓存并检查对应 step 的 generate 是否已缓存
+        # dataloader data arrives, cache and check if generate for corresponding step is already cached
         cur_global_steps, train_batch = data
 
         gen_step, gen_batch_output = await self.pipeline.pull("generate", "rollout")
@@ -187,25 +187,25 @@ class RolloutStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("rollout")
     async def process_data(self, data: Any) -> Any:
-        """处理训练逻辑 - 阻塞执行确保正确性"""
+        """Process training logic - block execution to ensure correctness"""
         if data is None:
             enhanced_print("rollout", None, "Received None data, waiting...")
             return None
         if data == "END":
             return {"step": None, "batch_dict": None, "batch": None, "pipeline_signal": PIPELINE_END_SIGNAL}
         
-        # 处理两种情况：只有dataloader数据，或者dataloader+generate数据
+        # Handle two cases: only dataloader data, or dataloader+generate data
         assert isinstance(data, (int, tuple, list)) and len(data) == 3, f"Invalid data format: {data}"
-        # 检查是否是 (dataloader_data, generate_data) 格式
+        # Check if it's (dataloader_data, generate_data) format
         cur_global_steps, train_batch, gen_batch_output = data
         batch_dict = train_batch
         
         metrics = {}
         timing_raw = {}
         
-        # 阻塞处理batch数据
+        # Block process batch data
         batch: DataProto = DataProto.from_single_dict(batch_dict)
-        # 需要重复执行预处理部分
+        # Need to repeat preprocessing part
         _gen_batch = self.trainer._pre_process_batch(batch)
         
         with _timer("step", timing_raw):
@@ -213,7 +213,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
             # repeat to align with repeated responses in rollout
             batch = batch.repeat(repeat_times=self.trainer.config.actor_rollout_ref.rollout.n, interleave=True)
             
-            # 如果有generate数据，则合并
+            # If there's generate data, merge it
             if gen_batch_output is not None:
                 batch = batch.union(gen_batch_output)
 
@@ -229,7 +229,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
             # compute global_valid tokens
             batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
             
-            # 以下交给train loop
+            # Hand over to train loop
         
         return {
             "step": cur_global_steps,
@@ -240,14 +240,14 @@ class RolloutStateMachine(BaseRoleStateMachine):
 
     
     async def send_output_data(self, data: Any) -> bool:
-        """发送训练结果 - 确保数据不丢失"""
+        """Send training results - ensure no data loss"""
         pipeline_signal = data["pipeline_signal"]
         if pipeline_signal == PIPELINE_END_SIGNAL:
             batch = PIPELINE_END_SIGNAL
         else:
             batch = data["batch"]
         
-        # 推送到所有下游，确保数据不丢失
+        # Push to all downstream, ensure no data loss
         push_tasks = []
         
         if self.pipeline.is_in_pipeline("logp"):
@@ -259,10 +259,10 @@ class RolloutStateMachine(BaseRoleStateMachine):
         if self.pipeline.is_in_pipeline("reward"):
             push_tasks.append(self.pipeline.push("rollout", "reward", (data["step"], batch)))
         
-        # 推送到train
+        # Push to train
         push_tasks.append(self.pipeline.push("rollout", "train", data))
         
-        # 并发执行所有推送
+        # Execute all pushes concurrently
         if push_tasks:
             await asyncio.gather(*push_tasks)
             enhanced_print("rollout", None, f"Successfully pushed to {len(push_tasks)} downstream")
@@ -272,7 +272,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
 
 
 class TrainStateMachine(BaseRoleStateMachine):
-    """增强的训练器状态机，完全对齐 ray_async_pipeline_trainer.py 的切换条件"""
+    """Enhanced trainer state machine, fully aligned with ray_async_pipeline_trainer.py switching conditions"""
     # input: 
     #   rollout -> train
     #   logp -> train
@@ -283,7 +283,7 @@ class TrainStateMachine(BaseRoleStateMachine):
     def __init__(self, pipeline, trainer):
         super().__init__("train", pipeline)
         self.trainer = trainer
-        # 延迟初始化，避免在构造函数中调用asyncio.run
+        # Lazy initialization, avoid calling asyncio.run in constructor
         self._init_completed = False
             
     async def _init_before_train(self):
@@ -322,14 +322,14 @@ class TrainStateMachine(BaseRoleStateMachine):
         self.last_val_metrics = None
 
     async def get_input_data(self) -> Optional[Any]:
-        """阻塞获取批次数据，确保依赖关系"""
+        """Block getting batch data, ensure dependencies"""
         
-        # 确保初始化完成
+        # Ensure initialization is complete
         if not self._init_completed:
             await self._init_before_train()
             self._init_completed = True
         
-        # 阻塞等待rollout数据
+        # Block waiting for rollout data
         data = await self.pipeline.pull("rollout", "train")
         
         if data is None:
@@ -337,12 +337,12 @@ class TrainStateMachine(BaseRoleStateMachine):
         if data["pipeline_signal"] == PIPELINE_END_SIGNAL:
             return "END"
         
-        # 阻塞等待所有依赖数据
+        # Block waiting for all dependency data
         logp_result = await self.pipeline.pull("logp", "train")
         ref_logp_result = await self.pipeline.pull("ref_logp", "train")
         reward_result = await self.pipeline.pull(src_role="reward", dst_role="train")
         
-        # 检查所有数据是否都收到
+        # Check if all data is received
         if logp_result is None or ref_logp_result is None or reward_result is None:
             return None
             
@@ -350,7 +350,7 @@ class TrainStateMachine(BaseRoleStateMachine):
         ref_logp_step, ref_log_prob = ref_logp_result
         reward_step, reward_tensor, reward_extra_infos_dict = reward_result
         
-        # 验证step一致性
+        # Verify step consistency
         assert logp_step == ref_logp_step == reward_step, f"Step mismatch: logp_step={logp_step}, ref_logp_step={ref_logp_step}, reward_step={reward_step}"
         
         enhanced_print("train", None, f"Successfully assembled data for step {logp_step}")
@@ -358,7 +358,7 @@ class TrainStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("train")
     async def process_data(self, data: Any) -> Any:
-        """处理训练逻辑，完全对齐 ray_async_pipeline_trainer.py 的训练流程"""
+        """Process training logic, fully aligned with ray_async_pipeline_trainer.py training flow"""
         if data == "END":
             return "END"
         
@@ -373,7 +373,7 @@ class TrainStateMachine(BaseRoleStateMachine):
         is_last_step = self.trainer.global_steps >= self.trainer.total_training_steps
         
         with _timer("step", timing_raw):
-            # 获取资源锁（用于训练阶段）
+            # Acquire resource lock (for training phase)
             await resource_lock.acquire("train", self.trainer.global_steps)
 
             # recompute old_log_probs
@@ -386,7 +386,7 @@ class TrainStateMachine(BaseRoleStateMachine):
                 metrics.update(old_log_prob_metrics)
                 old_log_prob.batch.pop("entropys")
                 
-                # 合并old_log_prob到batch
+                # Merge old_log_prob to batch
                 batch = batch.union(old_log_prob)
 
                 if "rollout_log_probs" in batch.batch.keys():
@@ -492,7 +492,7 @@ class TrainStateMachine(BaseRoleStateMachine):
                     worker = self.trainer.actor_rollout_wg if "actor_rollout" in self.trainer.resource_pool_to_cls else self.trainer.actor_wg
                     self.trainer._save_checkpoint(worker)
 
-        # 释放资源锁
+        # Release resource lock
         await resource_lock.release("train", self.trainer.global_steps)
 
         # training metrics
@@ -519,20 +519,20 @@ class TrainStateMachine(BaseRoleStateMachine):
             self.progress_bar.close()
             return "END"
         
-        # 返回的是当前完成的训练步数，代表model_steps
+        # Return the current completed training step, representing model_steps
         return self.trainer.global_steps - 1
     
     async def send_output_data(self, data: Any) -> bool:
-        """发送训练结果 - 阻塞确保数据传递"""
+        """Send training results - block to ensure data transfer"""
         if data == "END":
             data = PIPELINE_END_SIGNAL
 
         global_steps = data
-        # 阻塞推送到param_update，确保参数更新
+        # Block push to param_update, ensure parameter update
         await self.pipeline.push(src_role="train", dst_role="param_update", data=global_steps)
         enhanced_print("train", None, f"Sent training completion signal for step {global_steps} to param_update")
 
-        # 如果是train/logp/ref_logp复用资源，则阻塞推送到logp/ref_logp，确保不争抢资源
+        # If train/logp/ref_logp share resources, block push to logp/ref_logp to ensure no resource contention
         if self.trainer.config.trainer.get("share_resource_between_train_logp_ref_logp", True):
             await self.pipeline.push(src_role="train", dst_role="logp", data=global_steps)
             await self.pipeline.push(src_role="train", dst_role="ref_logp", data=global_steps)
@@ -542,7 +542,7 @@ class TrainStateMachine(BaseRoleStateMachine):
 
 
 class RewardStateMachine(BaseRoleStateMachine):
-    """增强的奖励状态机，使用阻塞模式确保依赖关系"""
+    """Enhanced reward state machine, using blocking mode to ensure dependencies"""
     # input: 
     #   rollout -> reward
     # output:
@@ -553,9 +553,9 @@ class RewardStateMachine(BaseRoleStateMachine):
         self.trainer = trainer
         
     async def get_input_data(self) -> Optional[Any]:
-        """阻塞获取奖励计算数据，确保依赖关系"""
+        """Block getting reward calculation data, ensure dependencies"""
         try:
-            # 阻塞等待数据，不设置timeout
+            # Block waiting for data, no timeout set
             reward_data = await self.pipeline.pull("rollout", "reward")
             if reward_data is None:
                 enhanced_print("reward", None, "Received None from rollout, waiting...")
@@ -567,7 +567,7 @@ class RewardStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("reward")
     async def process_data(self, data: Any) -> Any:
-        """处理奖励计算逻辑 - 阻塞执行确保正确性"""
+        """Process reward calculation logic - block execution to ensure correctness"""
         if data is None:
             enhanced_print("reward", None, "Received None data, waiting...")
             return None
@@ -577,17 +577,17 @@ class RewardStateMachine(BaseRoleStateMachine):
             return "END"
         enhanced_print("reward", None, f"Computing reward for step {step}")
         
-        # 初始化变量
+        # Initialize variables
         reward_tensor = None
         reward_extra_infos_dict = {}
         
-        # 阻塞执行奖励计算
+        # Block execute reward calculation
         if self.trainer.use_rm:
             reward_tensor = self.trainer.rm_wg.compute_rm_score(batch)
 
         if self.trainer.config.reward_model.launch_reward_fn_async:
             future_reward = compute_reward_async.remote(batch, self.trainer.config, self.trainer.tokenizer)
-            # 这里需要等待future_reward完成，但现在先使用同步版本
+            # Need to wait for future_reward to complete, but now use sync version first
             enhanced_print("reward", None, "Using async reward computation - converting to sync")
             # reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.trainer.reward_fn)
         else:
@@ -596,21 +596,21 @@ class RewardStateMachine(BaseRoleStateMachine):
         return (step, reward_tensor, reward_extra_infos_dict)
     
     async def send_output_data(self, data: Any) -> bool:
-        """发送奖励结果 - 阻塞确保数据传递"""
+        """Send reward results - block to ensure data transfer"""
         if data is None:
             return False
         if data == "END":
             # no need to send to train queue
             return True
         step, reward_tensor, reward_extra_infos_dict = data
-        # 阻塞发送结果，确保train能收到数据
+        # Block send results, ensure train can receive data
         await self.pipeline.push("reward", "train", (step, reward_tensor, reward_extra_infos_dict))
         enhanced_print("reward", None, f"Sent reward result for step {step}")
         return True
 
 
 class LogPStateMachine(BaseRoleStateMachine):
-    """增强的 LogP 状态机，使用阻塞模式确保依赖关系"""
+    """Enhanced LogP state machine, using blocking mode to ensure dependencies"""
     # input: 
     #   rollout -> logp
     # output:
@@ -621,9 +621,9 @@ class LogPStateMachine(BaseRoleStateMachine):
         self.trainer = trainer
         
     async def get_input_data(self) -> Optional[Any]:
-        """阻塞获取 LogP 计算数据，确保依赖关系"""
+        """Block getting LogP calculation data, ensure dependencies"""
         try:
-            # 阻塞等待数据，不设置timeout
+            # Block waiting for data, no timeout set
             batch = await self.pipeline.pull("rollout", "logp")
 
             if batch is None:
@@ -633,7 +633,7 @@ class LogPStateMachine(BaseRoleStateMachine):
             if batch == PIPELINE_END_SIGNAL:
                 return "END"
             
-            # 如果是logp/ref_logp和train共享资源，则等待train的上一个step完成
+            # If logp/ref_logp and train share resources, wait for train's previous step to complete
             if self.trainer.config.trainer.get("share_resource_between_train_logp_ref_logp", True):
                 enhanced_print("logp", None, f"Waiting for train to complete")
                 await self.pipeline.pull("train", "logp")
@@ -646,7 +646,7 @@ class LogPStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("logp")
     async def process_data(self, data: Any) -> Any:
-        """处理 LogP 计算逻辑 - 阻塞执行确保正确性"""
+        """Process LogP calculation logic - block execution to ensure correctness"""
         if data is None:
             enhanced_print("logp", None, "Received None data, waiting...")
             return None
@@ -658,21 +658,21 @@ class LogPStateMachine(BaseRoleStateMachine):
             return "END"
         enhanced_print("logp", None, f"Computing logp for step {step}")
         
-        # 获取资源锁，传递step参数
+        # Acquire resource lock, pass step parameter
         await resource_lock.acquire("logp", step)
         
-        # 阻塞执行LogP计算（直接调用，不使用asyncio.to_thread）
+        # Block execute LogP calculation (direct call, not using asyncio.to_thread)
         enhanced_print("logp", None, f"Starting LogP computation for step {step}")
         old_log_prob = self.trainer.actor_wg.compute_log_prob(batch)
         enhanced_print("logp", None, f"LogP computation finished for step {step}")
         
-        # 释放资源锁
+        # Release resource lock
         await resource_lock.release("logp")
         
         return (step, old_log_prob)
     
     async def send_output_data(self, data: Any) -> bool:
-        """发送 LogP 结果 - 阻塞确保数据传递"""
+        """Send LogP results - block to ensure data transfer"""
         if data is None:
             return False
         if data == "END":
@@ -680,7 +680,7 @@ class LogPStateMachine(BaseRoleStateMachine):
             return True
         
         step, logp_result = data
-        # 阻塞发送结果，确保train能收到数据
+        # Block send results, ensure train can receive data
         await self.pipeline.push("logp", "train", (step, logp_result))
         enhanced_print("logp", None, f"Sent logp result for step {step}")
 
@@ -690,7 +690,7 @@ class LogPStateMachine(BaseRoleStateMachine):
 
 
 class RefLogPStateMachine(BaseRoleStateMachine):
-    """增强的参考 LogP 状态机，使用阻塞模式确保依赖关系"""
+    """Enhanced reference LogP state machine, using blocking mode to ensure dependencies"""
     # input: 
     #   rollout -> ref_logp
     # output:
@@ -700,9 +700,9 @@ class RefLogPStateMachine(BaseRoleStateMachine):
         self.trainer = trainer
         
     async def get_input_data(self) -> Optional[Any]:
-        """阻塞获取参考 LogP 计算数据，确保依赖关系"""
+        """Block getting reference LogP calculation data, ensure dependencies"""
         try:
-            # 阻塞等待数据，不设置timeout
+            # Block waiting for data, no timeout set
             batch = await self.pipeline.pull("rollout", "ref_logp")
             if batch == PIPELINE_END_SIGNAL:
                 return "END"
@@ -723,7 +723,7 @@ class RefLogPStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("ref_logp")
     async def process_data(self, data: Any) -> Any:
-        """处理参考 LogP 计算逻辑 - 阻塞执行确保正确性"""
+        """Process reference LogP calculation logic - block execution to ensure correctness"""
         if data is None:
             enhanced_print("ref_logp", None, "Received None data, waiting...")
             return None
@@ -736,10 +736,10 @@ class RefLogPStateMachine(BaseRoleStateMachine):
             return "END"
         enhanced_print("ref_logp", None, f"Computing ref_logp for step {step}")
 
-        # 获取资源锁，传递step参数
+        # Acquire resource lock, pass step parameter
         await resource_lock.acquire("ref_logp", step)
         
-        # 阻塞执行参考LogP计算（直接调用，不使用asyncio.to_thread）
+        # Block execute reference LogP calculation (direct call, not using asyncio.to_thread)
         enhanced_print("ref_logp", None, f"Starting Ref LogP computation for step {step}")
         if not self.trainer.ref_in_actor:
             ref_log_prob = self.trainer.ref_policy_wg.compute_ref_log_prob(batch)
@@ -747,13 +747,13 @@ class RefLogPStateMachine(BaseRoleStateMachine):
             ref_log_prob = self.trainer.actor_wg.compute_ref_log_prob(batch)
         enhanced_print("ref_logp", None, f"Ref LogP computation finished for step {step}")
         
-        # 释放资源锁
+        # Release resource lock
         await resource_lock.release("ref_logp")
         
         return (step, ref_log_prob)
     
     async def send_output_data(self, data: Any) -> bool:
-        """发送参考 LogP 结果 - 阻塞确保数据传递"""
+        """Send reference LogP results - block to ensure data transfer"""
         if data is None:
             return False
         if data == "END":
@@ -761,14 +761,14 @@ class RefLogPStateMachine(BaseRoleStateMachine):
             return True
         
         step, ref_logp_result = data
-        # 阻塞发送结果，确保train能收到数据
+        # Block send results, ensure train can receive data
         await self.pipeline.push("ref_logp", "train", (step, ref_logp_result))
         enhanced_print("ref_logp", None, f"Sent ref_logp result for step {step}")
         return True
 
 
 class ParamUpdateStateMachine(BaseRoleStateMachine):
-    """异步RL参数更新状态机 - 使用param_update.py中的方法进行异步同步"""
+    """asyncRLparameterupdatestate machine - 使用param_update.py中的方法进行asyncsynchronization"""
     
     def __init__(self, pipeline, trainer):
         super().__init__("param_update", pipeline)
@@ -795,7 +795,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
             enhanced_print("AsyncRLParamUpdate", None, "param_update_manager not available, falling back to sync update")
     
     async def get_input_data(self) -> Optional[Any]:
-        """获取参数更新请求"""
+        """gettingparameterupdate请求"""
         try:
             data = await self.pipeline.pull("train", "param_update")
             if data == PIPELINE_END_SIGNAL:
@@ -813,7 +813,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
     
     @timing_decorator("param_update")
     async def process_data(self, data: Any) -> Any:
-        """处理参数更新请求 - 后台线程执行"""
+        """Processparameterupdate请求 - 后台线程execute"""
         if data == "END":
             return "END"
         elif data is None:
@@ -826,36 +826,36 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         # 记录开始时间
         start_time = time.time()
-        # 后续step在后台线程中执行，不阻塞主流程
+        # 后续step在后台线程中execute，不阻塞主流程
         if self.has_param_update_manager:
-            # 启动后台异步参数更新任务
+            # 启动后台asyncparameterupdate任务
             param_update_task = asyncio.create_task(
                 self._perform_async_param_update_background(global_steps)
             )
             self.stats["async_updates"] += 1
             enhanced_print("param_update", None, f"Async param update task created for step {global_steps}")
         else:
-            # 启动后台同步参数更新任务
+            # 启动后台synchronizationparameterupdate任务
             param_update_task = asyncio.create_task(
                 asyncio.to_thread(self._perform_sync_param_update_background, global_steps)
             )
             self.stats["sync_updates"] += 1
             enhanced_print("param_update", None, f"Sync param update task created for step {global_steps}")
         
-        # 立即返回，不等待参数更新完成
+        # 立即return，不waitingparameterupdatecompleted
         task_creation_time = time.time() - start_time
         
         enhanced_print("param_update", None, 
                         f"Param update task created for step {global_steps} in {task_creation_time:.3f}s (background execution)")
         
-        # 返回任务对象，让send_output_data等待完成
+        # return任务对象，让send_output_datawaitingcompleted
         return (global_steps, param_update_task)
 
     async def _perform_async_param_update_background(self, global_steps: int) -> bool:
-        """后台异步参数更新 - 后续step使用"""
+        """后台asyncparameterupdate - 后续step使用"""
         enhanced_print("param_update", None, f"Background async param update started for step {global_steps}")
         
-        # 获取锁（在后台线程中）
+        # getting锁（在后台线程中）
         await resource_lock.acquire("param_update", global_steps)
 
         start_time = time.time()
@@ -864,12 +864,12 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         self.trainer.actor_wg.async_param_update()
         self.trainer.rollout_wg.async_param_update()
         
-        # 等待send完成
+        # waitingsendcompleted
         self.trainer.actor_wg.wait_for_send_complete()
         
         update_time = time.time() - start_time
         
-        # 更新统计
+        # update统计
         self.stats["updates"] += 1
         self.stats["total_time"] += update_time
         self.stats["avg_time"] = self.stats["total_time"] / self.stats["updates"]
@@ -924,7 +924,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
 
     async def send_output_data(self, data: Any) -> bool:
-        """发送更新完成信号 - 等待异步任务完成后push"""
+        """sendupdatecompleted信号 - waitingasync任务completed后push"""
         if data == "END":
             enhanced_print("param_update", None, "Async param update completed, END signal processed")
             await self.pipeline.push("param_update", "generate", PIPELINE_END_SIGNAL)
@@ -937,7 +937,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
             global_steps, param_update_task = data
             enhanced_print("param_update", None, f"Waiting for background param update task to complete for step {global_steps}")
             
-            # 等待后台任务完成
+            # waiting后台任务completed
             success = await param_update_task
             if success:
                 enhanced_print("param_update", None, f"Background param update completed for step {global_steps}")
@@ -947,7 +947,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
             # 第一个step的情况，data就是global_steps
             global_steps = data
         
-        # 统一在这里处理push操作
+        # unified在这里Processpush操作
         enhanced_print("param_update", None, f"Sending completion signal to generate for step {global_steps}")
         await self.pipeline.push("param_update", "generate", global_steps)
         enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps}")
@@ -968,12 +968,12 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
 
 
 class GenerateStateMachine(BaseRoleStateMachine):
-    """异步RL生成状态机 - 支持可中断生成"""
+    """asyncRLgenerationstate machine - 支持可interruptgeneration"""
     
     def __init__(self, pipeline, trainer):
         super().__init__("generate", pipeline)
         self.trainer = trainer
-        self.first_generation = True  # 标记是否为第一次生成
+        self.first_generation = True  # 标记是否为第一次generation
         
         # 配置generate与param_update的距离
         self.generate_ahead_steps = trainer.config.trainer.get("generate_ahead_steps", 3)  # 增加默认值
@@ -983,7 +983,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
 
     @timing_decorator("generate")
     async def process_data(self, data: Any) -> Any:
-        """处理生成逻辑 - 后台线程执行"""
+        """Processgenerationlogic - 后台线程execute"""
         if data == "END":
             return "END"
         elif data is None:
@@ -993,21 +993,21 @@ class GenerateStateMachine(BaseRoleStateMachine):
         step, gen_batch = data
         enhanced_print("generate", None, f"Starting generation task for step {step}")
         
-        # 在后台线程中执行生成，不阻塞主流程
+        # 在后台线程中executegeneration，不阻塞主流程
         generation_task = asyncio.create_task(
             asyncio.to_thread(self._generate_sync, gen_batch, step)
         )
         
-        # 更新generate_global_step
+        # updategenerate_global_step
         self.trainer.generate_global_step += 1
         
         enhanced_print("generate", None, f"Generation task created for step {step}")
         
-        # 返回任务对象，让send_output_data等待完成
+        # return任务对象，让send_output_datawaitingcompleted
         return (step, generation_task)
 
     async def send_output_data(self, data: Any) -> bool:
-        """发送生成结果 - 等待异步任务完成后push"""
+        """sendgenerationresults - waitingasync任务completed后push"""
         if data == "END":
             enhanced_print("generate", None, "Sending END signal to rollout")
             await self.pipeline.push("generate", "rollout", PIPELINE_END_SIGNAL)
@@ -1020,7 +1020,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
             step, generation_task = data
             enhanced_print("generate", None, f"Waiting for background generation task to complete for step {step}")
             
-            # 等待后台任务完成
+            # waiting后台任务completed
             gen_batch_output = await generation_task
             if gen_batch_output is None:
                 raise Exception(f"Generation failed for step {step}")
@@ -1028,10 +1028,10 @@ class GenerateStateMachine(BaseRoleStateMachine):
             enhanced_print("generate", None, f"Background generation completed for step {step}")
 
         else:
-            # 处理其他情况
+            # Process其他情况
             step, gen_batch_output = data
         
-        # 统一在这里处理push操作
+        # unified在这里Processpush操作
         enhanced_print("generate", None, f"Sending generation result to rollout for step {step}")
         await self.pipeline.push("generate", "rollout", (step, gen_batch_output))
         enhanced_print("generate", None, f"Generation result sent to rollout for step {step}")
@@ -1039,11 +1039,11 @@ class GenerateStateMachine(BaseRoleStateMachine):
         return True
     
     async def get_input_data(self) -> Optional[Any]:
-        """获取生成数据 - 只在距离过大时才等待param_update"""        
-        # 第一次生成时需要等待param_update完成，确保有可用的权重
+        """gettinggenerationdata - 只在距离过大时才waitingparam_update"""        
+        # 第一次generation时需要waitingparam_updatecompleted，确保有可用的权重
         if self.first_generation:
             enhanced_print("generate", None, "First generation, waiting for initial param_update to complete...")
-            # 第一个step时，必须等待param_update完成
+            # 第一个step时，必须waitingparam_updatecompleted
             param_update_signal = await self.pipeline.pull("param_update", "generate")
             
             if param_update_signal == PIPELINE_END_SIGNAL:
@@ -1052,12 +1052,12 @@ class GenerateStateMachine(BaseRoleStateMachine):
             elif param_update_signal is None:
                 return None
             
-            # 更新最后一个param_update的step
+            # update最后一个param_update的step
             self.last_param_update_step = param_update_signal
             enhanced_print("generate", None, f"First generation: received param_update completion signal for step {param_update_signal}")
             self.first_generation = False
         
-        # 等待dataloader的数据
+        # waitingdataloader的data
         data = await self.pipeline.pull("dataloader", "generate")
         
         if data == PIPELINE_END_SIGNAL:
@@ -1072,10 +1072,10 @@ class GenerateStateMachine(BaseRoleStateMachine):
             
         step, gen_batch = data
         
-        # 检查generate与param_update的距离，如果太远则阻塞等待param_update来更新last_param_update_step
+        # 检查generate与param_update的距离，如果太远则Block waitingparam_update来updatelast_param_update_step
         while step >= self.last_param_update_step + self.generate_ahead_steps:
             enhanced_print("generate", None, f"Step {step} is too far ahead of param_update {self.last_param_update_step}, waiting for next param_update...")
-            # 等待下一个param_update完成来更新last_param_update_step
+            # waiting下一个param_updatecompleted来updatelast_param_update_step
             param_update_signal = await self.pipeline.pull("param_update", "generate")
             
             if param_update_signal == PIPELINE_END_SIGNAL:
@@ -1084,7 +1084,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
             elif param_update_signal is None:
                 return None
             
-            # 更新最后一个param_update的step
+            # update最后一个param_update的step
             self.last_param_update_step = param_update_signal
             enhanced_print("generate", None, f"Updated param_update step to {param_update_signal}")
         
@@ -1092,13 +1092,13 @@ class GenerateStateMachine(BaseRoleStateMachine):
         return (step, gen_batch)
     
     def _generate_sync(self, gen_batch, step: int):
-        """同步生成函数 - 在后台线程中执行"""
+        """synchronizationgeneration函数 - 在后台线程中execute"""
         try:
             enhanced_print("generate", None, f"Background generation started for step {step}")
             
             start_time = time.time()
             
-            # 执行生成
+            # executegeneration
             wg = self.trainer.rollout_wg
             gen_batch_output = wg.generate_sequences_sperated(gen_batch)
             
@@ -1115,7 +1115,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
             return None
 
     def get_status_info(self) -> Dict[str, Any]:
-        """获取详细状态信息"""
+        """getting详细状态信息"""
         async_rl_stats = {}
         return {
             "type": "async_rl_generate",
@@ -1127,13 +1127,13 @@ class GenerateStateMachine(BaseRoleStateMachine):
 
 def create_role_state_machine(role_name: str, pipeline, trainer, use_async_rl: bool = False) -> BaseRoleStateMachine:
     """
-    创建角色状态机工厂函数
+    创建角色state machine工厂函数
     
     Args:
         role_name: 角色名称
         pipeline: pipeline实例
         trainer: trainer实例  
-        use_async_rl: 是否使用异步RL优化（默认False）
+        use_async_rl: Whether to use async RL optimization (default False)
     """
     state_machines = {
         "dataloader": DataloaderStateMachine,

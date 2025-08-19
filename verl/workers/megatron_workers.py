@@ -351,7 +351,7 @@ class ActorRolloutRefWorker(MegatronWorker):
                 param_update_preduce_bucket_size_mb=self.config.actor.get("param_update_preduce_bucket_size_mb", 512),
             )
             
-            # 注册actor集群（如果配置了的话）
+            # Register actor clusters (if configured)
             if hasattr(self.config, 'actor_clusters'):
                 train_ranks = self.config.actor_clusters.get('train_ranks', [])
                 generate_ranks = self.config.actor_clusters.get('generate_ranks', [])
@@ -451,7 +451,7 @@ class ActorRolloutRefWorker(MegatronWorker):
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
                 device_mesh=rollout_device_mesh,
-                param_update_manager=self.param_update_manager,  # 传入param_update_manager
+                param_update_manager=self.param_update_manager,
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
 

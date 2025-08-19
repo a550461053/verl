@@ -329,8 +329,7 @@ class DualBufferAsyncEngine:
                 # Buffer manager encapsulating buffer ops
                 
                 self._bufman = _BufferManager(self, bucket_size_mb=bucket_size_mb)
-        
-                # 添加双buffer方法到动态创建的类
+
         def update_weights_from_tensor_sync(self, named_tensors, update_weights_func_call, load_format=None, flush_cache=True, target_buffer=None, version=None):
             """Synchronized version of dual-buffer weight update - thread-safe, support cross-thread call"""
             with self._update_lock:
@@ -379,13 +378,9 @@ class DualBufferAsyncEngine:
             else:
                 iterable = named_tensors
 
-            updated = 0
             for name, tensor in iterable:
                 self._buffer_weights[target_buffer][name] = tensor
-                updated += 1
-            # total = len(self._buffer_weights[target_buffer])
-            # print(f"[DualBufferAsyncEngine] Registered and updated buffer {target_buffer}, newly added: {updated}, total weights: {total}")
-        
+
         def set_params_meta(self, params_meta):
             self._buffer_meta = params_meta
 
@@ -433,7 +428,7 @@ class DualBufferAsyncEngine:
             return result
 
         def _apply_weights_to_engine_sync(self, weights, update_weights_func_call):
-            """同步方式将权重应用到引擎 - 直接调用AsyncEngine的update_weights_from_tensor"""
+            """Synchronized version: apply weights to engine - directly call AsyncEngine's update_weights_from_tensor"""
             try:                
                 # Directly call AsyncEngine's update_weights_from_tensor method
                 # Use sync wrapper to handle async call

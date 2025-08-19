@@ -837,7 +837,7 @@ class SGLangRollout(BaseRollout):
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-        # 将 attention_mask 拼接也放在 CPU，避免GPU峰值
+
         attention_mask_cpu = attention_mask.to("cpu", non_blocking=True)
         response_attention_mask_cpu = response_attention_mask.to("cpu", non_blocking=True)
         attention_mask = torch.cat((attention_mask_cpu, response_attention_mask_cpu), dim=-1)
@@ -857,39 +857,22 @@ class SGLangRollout(BaseRollout):
 
         # free cache engine
         if self.config.free_cache_engine and self._engine is not None:
-            # 修复：在Ray worker线程中使用新的事件循环执行asyncio调用
             import threading
             import concurrent.futures
             current_thread = threading.current_thread()
             is_main_thread = current_thread.name == 'MainThread'
             
             if is_main_thread:
-                # 在主线程中，直接使用asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    loop.run_until_complete(self._engine.flush_cache())
-                except Exception as e:
-                    print(f"Async flush_cache failed in main thread: {e}")
-                    # 忽略flush_cache错误，不影响主要功能
-                    pass
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(self._engine.flush_cache())
             else:
-
                 def run_async_flush_cache_in_new_thread():
-                    """在新线程中运行异步flush_cache，创建新的事件循环"""
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     try:
-                        # 创建新的事件循环
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            return loop.run_until_complete(self._engine.flush_cache())
-                        finally:
-                            loop.close()
-                    except Exception as e:
-                        print(f"Thread pool async flush_cache failed: {e}")
-                        # 忽略flush_cache错误，不影响主要功能
-                        pass
-                
-                # 使用线程池执行
+                        return loop.run_until_complete(self._engine.flush_cache())
+                    finally:
+                        loop.close()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(run_async_flush_cache_in_new_thread)
                     try:
