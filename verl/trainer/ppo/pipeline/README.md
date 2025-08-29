@@ -146,7 +146,7 @@ Loading   Generation   Rollout   Log Probs   Rewards   Model    Params
 
 ### Key Parameters
 
-```python
+```bash
 # Async RL Configuration
 +actor_rollout_ref.async_pipeline=True \
  
@@ -154,6 +154,8 @@ Loading   Generation   Rollout   Log Probs   Rewards   Model    Params
 +trainer.sperated_node_ratios=[0.5,0.5] \
 # means: each task group uses 0.5 of total nodes
 # means: train/logp/ref_logp use 0.5 ngpus, generate use 0.5 ngpus
+
+```
 
 ## Task Group Configuration Examples
 
@@ -193,16 +195,14 @@ Loading   Generation   Rollout   Log Probs   Rewards   Model    Params
 3. **Task Grouping**: Tasks in the same list share the same node resources
 4. **Resource Allocation**: Each task group gets the specified ratio of total nodes
  
+```sh
 # Performance Tuning, enable async-param-update
 +actor_rollout_ref.rollout.enable_dual_buffer=True \
 # The sender granularity of the actor training node during parameter update
 +actor_rollout_ref.rollout.param_update_preduce_bucket_size_mb=512 \
 # The receiver granularity of the rollout inference node is too large, which will cause GPU-OOM
 +actor_rollout_ref.rollout.param_update_consume_bucket_size_mb=128 \
- 
-# Async LogP/RefLogP computation
-# Uses ray.remote for non-blocking logp and ref_logp computation
- 
+
 # The granularity of offpolicy, 1 means that generate is faster than the train node to execute 1 steps, that is, one-step-offpolicy
 +trainer.generate_ahead_steps=2 \
 ```
