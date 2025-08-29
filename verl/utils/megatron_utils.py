@@ -994,12 +994,16 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
         else:
             cur_tensor, cur_name = None, None
 
+        # pp broadcast model tensor and name - align with original version
+        cur_name = broadcast_str_from_megatron_pp(cur_name)
+        broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
+
         # fix parameter name
         while cur_name.startswith("module."):
             cur_name = cur_name[len("module.") :]
 
         # calculate tensor size
-        tensor_size = calculate_tensor_size(cur_tensor)
+        tensor_size = calculate_tensor_size(broad_pp_tensor)
         
         # if current bucket is already large enough, or adding this tensor will exceed bucket size, create new bucket
         if current_bucket_size + tensor_size > bucket_size_bytes and current_bucket:
@@ -1007,57 +1011,37 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
             current_bucket = []
             current_bucket_size = 0
         
-        current_bucket.append((cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor))
+        current_bucket.append((cur_pp_rank, scan_vpp_idx, idx, name, cur_name, broad_pp_tensor))
         current_bucket_size += tensor_size
 
     # add last bucket
     if current_bucket:
         buckets.append(current_bucket)
 
-    # step 3: batch broadcast tensors by bucket, return bucket-level iterator
+    # step 3: process tensors by bucket, return bucket-level iterator
     for bucket_idx, bucket in enumerate(buckets):
-        # batch broadcast all tensors in bucket
-        bucket_names = []
-        bucket_tensors = []
-        
+        # Process each tensor in the bucket using already broadcasted results from step 2
         for cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor in bucket:
-            bucket_names.append(cur_name)
-            bucket_tensors.append(cur_tensor)
-        
-        # batch broadcast names
-        bucket_names_broadcasted = broadcast_str_from_megatron_pp(bucket_names)
-        
-        # batch broadcast tensors (need special handling because tensors may be on different ranks)
-        bucket_tensors_broadcasted = []
-        
-        for i, (cur_pp_rank, scan_vpp_idx, idx, name, cur_name, cur_tensor) in enumerate(bucket):
-            if cur_tensor is not None:
-                # if tensor is on current rank, broadcast to other ranks
-                broadcasted_tensor = broadcast_from_megatron_pp(cur_tensor)
-            else:
-                # if tensor is not on current rank, receive broadcast
-                broadcasted_tensor = broadcast_from_megatron_pp(None)
+            # Use the already broadcasted results from step 2
+            # cur_name and cur_tensor are already broadcasted at this point
+            broad_pp_tensor = cur_tensor  # Rename for consistency
             
-            bucket_tensors_broadcasted.append(broadcasted_tensor)
-
-        # process all tensors in current bucket, including EP and TP logic
-        for name, broad_pp_tensor in zip(bucket_names_broadcasted, bucket_tensors_broadcasted):
             if broad_pp_tensor is None:
                 continue
                 
             # EP (Expert Parallel) logic
-            if ".mlp.experts.linear_fc" in name and ep_size > 1:
+            if ".mlp.experts.linear_fc" in cur_name and ep_size > 1:
                 num_experts = weight_converter.mcore_config.num_moe_experts
                 num_experts_per_rank = num_experts // ep_size
                 infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(ep_size)]
                 torch.distributed.all_gather(infer_params, broad_pp_tensor, group=ep_group)
 
-                name_prefix, local_expert_id = name.split(".weight")
+                name_prefix, local_expert_id = cur_name.split(".weight")
                 local_expert_id = int(local_expert_id)
                 global_expert_ids = [num_experts_per_rank * ep_rank + local_expert_id for ep_rank in range(ep_size)]
                 global_expert_names = [f"{name_prefix}.weight{expert_id}" for expert_id in global_expert_ids]
 
-                for expert_name, param in zip(global_expert_names, infer_params):
+                for name, param in zip(global_expert_names, infer_params, strict=True):
                     if etp_size > 1:
                         # gather etp
                         etp_params = [torch.empty_like(param) for _ in range(etp_size)]
@@ -1066,10 +1050,18 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
                     else:
                         params = [param]
 
-                    merge_params = default_tp_concat_fn(layer_name_mapping, expert_name, broad_pp_tensor, params, model_config, weight_converter.hf_config, convert_qkv_gate_up_by_simple_split)
+                    merge_params = default_tp_concat_fn(
+                        layer_name_mapping,
+                        name,
+                        broad_pp_tensor,
+                        params,
+                        model_config,
+                        weight_converter.hf_config,
+                        convert_qkv_gate_up_by_simple_split,
+                    )
                     if not isinstance(merge_params, list):
                         merge_params = [merge_params]
-                    converted_names, converted_params = weight_converter.convert_param(expert_name, merge_params)
+                    converted_names, converted_params = weight_converter.convert_param(name, merge_params)
 
                     yield from zip(converted_names, to_device(converted_params))
                 continue
@@ -1082,13 +1074,21 @@ def per_tensor_generator_bucketed(actor_module, model_config, weight_converter, 
                 else:
                     infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
                     torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
-                infer_params = default_tp_concat_fn(layer_name_mapping, name, broad_pp_tensor, infer_params, model_config, weight_converter.hf_config, convert_qkv_gate_up_by_simple_split)
+                infer_params = default_tp_concat_fn(
+                    layer_name_mapping,
+                    cur_name,
+                    broad_pp_tensor,
+                    infer_params,
+                    model_config,
+                    weight_converter.hf_config,
+                    convert_qkv_gate_up_by_simple_split,
+                )
             else:
                 infer_params = broad_pp_tensor
 
             if not isinstance(infer_params, list):
                 infer_params = [infer_params]
-            converted_names, converted_params = weight_converter.convert_param(name, infer_params)
+            converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
 
             yield from zip(converted_names, to_device(converted_params))
 
