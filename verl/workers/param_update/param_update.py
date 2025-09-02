@@ -13,7 +13,7 @@ from verl.workers.param_update.ray_async_communication import (
 )
 
 from verl.trainer.ppo.pipeline.pipeline_utils import enhanced_print
-from verl.utils.megatron_utils import per_tensor_generator, per_tensor_generator_bucketed
+from verl.utils.megatron_utils import per_tensor_generator
 
 
 # ============================================================================
@@ -235,14 +235,13 @@ class ParamUpdateManager:
     def _get_params_iter_bucketed(self, target_device, bucket_size_mb):
         """Simplified bucketed parameter iterator - no prefetch, directly return tensor data"""
         # Get tensor data
-        bucket_generator = per_tensor_generator_bucketed(
+        bucket_generator = per_tensor_generator(
             self.model_params,
             self.model_config,
             self.weight_converter,
             self.transformer_config,
             self.layer_name_mapping,
             target_device=target_device,
-            bucket_size_mb=bucket_size_mb,
         )
         
         # Directly return tensor data, no prefetch

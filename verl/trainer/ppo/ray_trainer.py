@@ -979,9 +979,18 @@ class RayPPOTrainer:
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
         # load actor
-        self.actor_rollout_wg.load_checkpoint(
-            actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-        )
+        if hasattr(self, 'self.async_pipline_init') and self.self.async_pipline_init:
+            self.actor_wg.load_checkpoint(
+                actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            )
+            if hasattr(self, 'sperated_ref_model') and self.sperated_ref_model:
+                self.ref_policy_wg.load_checkpoint(
+                    actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+                )
+        else:
+            self.actor_rollout_wg.load_checkpoint(
+                actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            )
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(
