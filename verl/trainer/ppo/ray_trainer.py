@@ -984,8 +984,9 @@ class RayPPOTrainer:
                 actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
             if hasattr(self, 'sperated_ref_model') and self.sperated_ref_model:
+                ref_policy_path = self.config.actor_rollout_ref.model.path
                 self.ref_policy_wg.load_checkpoint(
-                    actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+                    ref_policy_path, del_local_after_load=False
                 )
         else:
             self.actor_rollout_wg.load_checkpoint(
