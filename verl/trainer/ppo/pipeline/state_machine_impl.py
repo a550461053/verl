@@ -1228,7 +1228,13 @@ class ValidationStateMachine(BaseRoleStateMachine):
                 enhanced_print("validation", None, "Performing initial validation before training")
                 self.initial_validation_done = True
                 return "INITIAL_VALIDATION"
-            
+
+            if not self.val_before_train and not self.initial_validation_done:
+                # Skip initial validation if not required
+                self.initial_validation_done = True
+                await self.pipeline.push("validation", "train", None)
+                return None
+
             # Block waiting for validation trigger from train
             trigger = await self.pipeline.pull("train", "validation")
             
@@ -1240,7 +1246,8 @@ class ValidationStateMachine(BaseRoleStateMachine):
             
             # Check if validation should be performed
             current_step = trigger
-            if current_step - self.last_validation_step >= self.validation_freq:
+            is_last_step = current_step >= self.trainer.total_training_steps
+            if (current_step - self.last_validation_step >= self.validation_freq) or is_last_step:
                 self.last_validation_step = current_step
                 enhanced_print("validation", None, f"Validation triggered for step {current_step}")
                 return current_step
