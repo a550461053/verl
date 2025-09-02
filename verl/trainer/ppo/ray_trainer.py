@@ -979,7 +979,7 @@ class RayPPOTrainer:
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
         # load actor
-        if hasattr(self, 'self.async_pipline_init') and self.self.async_pipline_init:
+        if hasattr(self, 'async_pipline_init') and self.async_pipline_init:
             self.actor_wg.load_checkpoint(
                 actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
