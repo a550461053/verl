@@ -278,11 +278,12 @@ class ParamUpdateManager:
         
         # Build global mapping
         for name, tensor in per_tensor_param:
-            if tensor is not None:
+            if tensor is not None and self.is_train_master_node():
                 global_tensor_map[name] = tensor.to(target_device)
-        
-        enhanced_print("param_update", None, f"Created global tensor map with {len(global_tensor_map)} tensors")
-        
+
+        if self.is_train_master_node():
+            enhanced_print("param_update", None, f"Created global tensor map with {len(global_tensor_map)} tensors")
+
         # Return enhanced iterator with meta info and global mapping
         return global_tensor_map, groups, group_tensor_count
     
@@ -521,13 +522,13 @@ class ParamUpdateManager:
         
         # Use enhanced bucketed function to get tensor data and grouping info
         global_tensor_map, groups, group_tensor_count = self._get_params_iter_bucketed_enhanced(self.target_device, bucket_size_mb=self.send_bucket_size_mb)
-        
-        if self.is_train_master_node() and (not global_tensor_map or not groups):
-            enhanced_print("param_update", None, "Async send: no tensor data or groups available")
-            return
-        
+
         if not self.is_train_master_node():
             # Non-send nodes can exit directly after syncing params
+            return
+
+        if self.is_train_master_node() and (not global_tensor_map or not groups):
+            enhanced_print("param_update", None, "Async send: no tensor data or groups available")
             return
         
         # Use unified version (each async send advances global version once)
