@@ -361,7 +361,9 @@ class ParamUpdateManager:
                 concatenated_tensor = torch.cat(converted_tensors, dim=0)
             
             # Broadcast the concatenated tensor
+            enhanced_print("param_update", None, f"Starting broadcast for {bucket_name} with tensor size {concatenated_tensor.numel()}")
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+            enhanced_print("param_update", None, f"Completed broadcast for {bucket_name}")
             
             if self.verbose_logging:
                 enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
@@ -397,7 +399,9 @@ class ParamUpdateManager:
                 enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using float32")
                 concatenated_tensor = torch.zeros(total_size, dtype=torch.float32, device="cuda")
             
+            enhanced_print("param_update", None, f"Starting receive broadcast for {bucket_name} with expected size {total_size}")
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+            enhanced_print("param_update", None, f"Completed receive broadcast for {bucket_name}, received tensor size {concatenated_tensor.numel()}")
             
             # Split the concatenated tensor back into individual tensors
             received_tensors = []
@@ -427,7 +431,7 @@ class ParamUpdateManager:
             del received_tensors
             del concatenated_tensor
             
-            # Force garbage collection and clear cache
+            # Force garbage collection but don't clear cache during NCCL communication
             import gc
             gc.collect()
             if torch.cuda.is_available():
@@ -663,6 +667,7 @@ class ParamUpdateManager:
         return {}
 
     def get_params_meta(self):
+        """Get parameter metadata"""
         # Check if _params_meta is initialized and not empty
         if hasattr(self, '_params_meta') and self._params_meta and len(self._params_meta) > 0:
             return self._params_meta
@@ -701,7 +706,6 @@ class ParamUpdateManager:
                 }
                 self._params_meta.append(meta)
 
-        
         enhanced_print("param_update", None, f"Generated {len(self._params_meta)} parameter metadata entries using bucketed generator")
         return self._params_meta
 

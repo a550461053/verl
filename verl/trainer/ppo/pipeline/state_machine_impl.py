@@ -955,6 +955,16 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         # waiting send completed
         self.trainer.actor_wg.wait_for_send_complete()
+        
+        # In NCCL sync mode, also wait for recv to complete to ensure all broadcast operations are done
+        # Check if using NCCL sync mode (enable_param_async=False)
+        if hasattr(self.trainer.actor_wg.workers[0], 'param_update_manager'):
+            enable_param_async = getattr(self.trainer.actor_wg.workers[0].param_update_manager, 'enable_param_async', True)
+            if not enable_param_async:
+                # NCCL sync mode: wait for recv to complete
+                self.trainer.actor_wg.wait_for_recv_complete()
+                self.trainer.rollout_wg.wait_for_recv_complete()
+                enhanced_print("param_update", None, f"NCCL sync mode: waited for recv completion for step {global_steps}")
 
         send_time = time.time() - start_time
 
