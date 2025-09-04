@@ -38,16 +38,25 @@ class _BufferManager:
     This manager operates directly on the owning engine's attributes to avoid
     duplicating state and to keep changes minimal and localized.
     """
-    def __init__(self, engine, bucket_size_mb=None):
+    def __init__(self, engine, bucket_size_mb=None, memory_efficient_mode=False):
         self._e = engine
         self._use_reqinput = True  # Enable prefetch, avoid sharing issues by non-FD serialization
         self._use_torch_fd = True  # Keep Torch FD for best performance
         self._use_batch_serialize = True  # Enable batch serialization: fresh serialize the whole list at once when switching
         self._use_reqinput_prefetch = False  # Prefetch serialization in recv stage, can further overlap serialization time; WIP
         
+        # Memory optimization: single buffer mode to reduce CPU memory usage
+        self._memory_efficient_mode = memory_efficient_mode
+
         # Maintain per-buffer (name -> serialized bytes) pool, avoid cross-process FD handle expiration
         # Note: here store the bytes after MultiprocessingSerializer.serialize, not RequestInput object
-        self._serialized_pool = [dict(), dict()]
+        if self._memory_efficient_mode:
+            # Single buffer mode: only maintain one buffer to save memory
+            self._serialized_pool = [dict()]
+            enhanced_print("BufferManager", None, "Memory efficient mode enabled: using single buffer to reduce CPU memory usage")
+        else:
+            # Dual buffer mode: maintain two buffers for better performance
+            self._serialized_pool = [dict(), dict()]
         
         # Unified bucket size setting, support external input or default value
         if bucket_size_mb is not None:
@@ -72,9 +81,14 @@ class _BufferManager:
 
     def target_for_update(self) -> int:
         # Default update non-active buffer
-        if not self._e._buffer_ready[self._e._active_buffer]:
-            return self._e._active_buffer
-        return 1 - self._e._active_buffer
+        if self._e._memory_efficient_mode:
+            # Single buffer mode: always use buffer 0
+            return 0
+        else:
+            # Dual buffer mode: update non-active buffer
+            if not self._e._buffer_ready[self._e._active_buffer]:
+                return self._e._active_buffer
+            return 1 - self._e._active_buffer
 
     def _ensure_buffer_dict(self, buf_idx: int) -> None:
         # Safety check: ensure index is within valid range
@@ -309,15 +323,29 @@ class DualBufferAsyncEngine:
             def __init__(self, **kwargs):
                 if 'bucket_size_mb' in kwargs:
                     bucket_size_mb = kwargs.pop('bucket_size_mb', None)
+                if 'memory_efficient_mode' in kwargs:
+                    memory_efficient_mode = kwargs.pop('memory_efficient_mode', False)
+                else:
+                    memory_efficient_mode = False
 
                 super().__init__(**kwargs)
                 
                 # Dual-buffer state
+                self._memory_efficient_mode = memory_efficient_mode
                 self._active_buffer = 0  # Current active buffer (0 or 1)
-                self._buffer_ready = [False, False]  # Ready state of two buffers
-                self._buffer_weights = [None, None]  # Weights of two buffers
-                self._buffer_metas = [None, None]
-                self._buffer_versions = [None, None]  # Version numbers of two buffers
+                if self._memory_efficient_mode:
+                    # Single buffer mode: only maintain one buffer to save memory
+                    self._buffer_ready = [False]  # Ready state of single buffer
+                    self._buffer_weights = [None]  # Weights of single buffer
+                    self._buffer_metas = [None]
+                    self._buffer_versions = [None]  # Version numbers of single buffer
+                    enhanced_print("DualBufferAsyncEngine", None, "Memory efficient mode enabled: using single buffer to reduce CPU memory usage")
+                else:
+                    # Dual buffer mode: maintain two buffers for better performance
+                    self._buffer_ready = [False, False]  # Ready state of two buffers
+                    self._buffer_weights = [None, None]  # Weights of two buffers
+                    self._buffer_metas = [None, None]
+                    self._buffer_versions = [None, None]  # Version numbers of two buffers
                 self._update_lock = threading.RLock()  # Use threading.RLock instead of asyncio.Lock, support cross-thread
                 
                 # Version management
@@ -329,15 +357,19 @@ class DualBufferAsyncEngine:
 
                 # Buffer manager encapsulating buffer ops
                 
-                self._bufman = _BufferManager(self, bucket_size_mb=bucket_size_mb)
+                self._bufman = _BufferManager(self, bucket_size_mb=bucket_size_mb, memory_efficient_mode=memory_efficient_mode)
 
         def update_weights_from_tensor_sync(self, named_tensors, update_weights_func_call, load_format=None, flush_cache=True, target_buffer=None, version=None):
             """Synchronized version of dual-buffer weight update - thread-safe, support cross-thread call"""
             with self._update_lock:
                 # Determine target buffer
                 if target_buffer is None:
-                    # Default update non-active buffer
-                    target_buffer = 1 - self._active_buffer
+                    if self._memory_efficient_mode:
+                        # Single buffer mode: always use buffer 0
+                        target_buffer = 0
+                    else:
+                        # Dual buffer mode: default update non-active buffer
+                        target_buffer = 1 - self._active_buffer
                 
                 # Determine version number
                 if version is None:
@@ -587,6 +619,6 @@ class DualBufferAsyncEngine:
         DualBufferAsyncEngineImpl.get_stats = get_stats
         DualBufferAsyncEngineImpl.get_bucket_size_mb = get_bucket_size_mb
         DualBufferAsyncEngineImpl.set_bucket_size_mb = set_bucket_size_mb
-        
+
         # Return new instance
         return DualBufferAsyncEngineImpl(**kwargs)

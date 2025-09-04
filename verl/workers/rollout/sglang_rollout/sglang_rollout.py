@@ -482,6 +482,7 @@ class SGLangRollout(BaseRollout):
                 print(f"[SGLangRollout] Initializing DualBufferAsyncEngine for dual buffer optimization")
                 from .dual_buffer_engine import DualBufferAsyncEngine
                 buffer_bucket_size_mb = getattr(self.config, 'param_update_consume_bucket_size_mb', 128)
+                memory_efficient_mode = getattr(self.config, 'memory_efficient_mode', False)
                 self._engine = DualBufferAsyncEngine(
                     model_path=actor_module,
                     dtype=self.config.dtype,
@@ -511,6 +512,7 @@ class SGLangRollout(BaseRollout):
                     # inconsistency issue.
                     skip_tokenizer_init=self.config.mode == "async",
                     bucket_size_mb=buffer_bucket_size_mb,
+                    memory_efficient_mode=memory_efficient_mode,
                     **engine_kwargs,
                 )
                 print(f"[SGLangRollout] DualBufferAsyncEngine initialized successfully")

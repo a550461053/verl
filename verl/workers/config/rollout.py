@@ -112,6 +112,9 @@ class RolloutConfig(BaseConfig):
     param_update_preduce_bucket_size_mb: int = 512
     param_update_consume_bucket_size_mb: int = 128
 
+    # Memory optimization: use single buffer to reduce CPU memory usage
+    memory_efficient_mode: bool = True
+
     # TODO: enable train_kwargs
     # train_sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
 
