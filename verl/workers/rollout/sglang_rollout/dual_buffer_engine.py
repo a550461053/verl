@@ -296,6 +296,41 @@ class _BufferManager:
     def clear_buffer_metas(self, buf_idx: int):
         """Clear metadata for specified buffer"""
         self._e._buffer_metas[buf_idx].clear()
+
+    def clear_buffer_data(self, buf_idx: int, reset_state: bool = False):
+        """Clear buffer data and metadata for specified buffer to free memory
+        
+        Args:
+            buf_idx: Buffer index to clear
+            reset_state: If True, reset _buffer_ready and _buffer_versions. 
+                        If False, keep buffer state intact (default for active buffer)
+        """
+        # Clear buffer weights (the main memory consumer)
+        if self._e._buffer_weights[buf_idx] is not None:
+            self._e._buffer_weights[buf_idx].clear()
+            self._e._buffer_weights[buf_idx] = None
+        
+        # Clear buffer metadata
+        if self._e._buffer_metas[buf_idx] is not None:
+            self._e._buffer_metas[buf_idx].clear()
+            self._e._buffer_metas[buf_idx] = None
+        
+        # Clear serialized pool data
+        if buf_idx < len(self._serialized_pool):
+            self._serialized_pool[buf_idx].clear()
+        
+        # Optionally reset buffer state
+        if reset_state:
+            self._e._buffer_ready[buf_idx] = False
+            self._e._buffer_versions[buf_idx] = None
+            enhanced_print('BufferManager', None, f'Cleared buffer {buf_idx} data and reset state completely')
+        else:
+            # Keep buffer state intact to avoid blocking wait_for_buffer_write and execute_update_weights_before_generate
+            enhanced_print('BufferManager', None, f'Cleared buffer {buf_idx} data (kept buffer state intact)')
+
+
+
+
         
     def get_stats(self) -> dict:
         """Get BufferManager statistics"""
@@ -392,7 +427,7 @@ class DualBufferAsyncEngine:
                     # Switch to new updated buffer
                     self._active_buffer = target_buffer
                     self._current_version = version
-                    self._bufman.clear_buffer_metas(target_buffer) # Clear buffer reference
+                    self._bufman.clear_buffer_data(target_buffer)  # Clear old buffer data to free memory # Clear buffer reference
                     enhanced_print("DualBufferAsyncEngine", None, f"Switched to buffer {target_buffer} for version {version}")
                 else:
                     enhanced_print("DualBufferAsyncEngine", None, f"ERROR: Failed to apply weights to engine for version {version}")
@@ -420,6 +455,8 @@ class DualBufferAsyncEngine:
         def _get_buffer(self, target_buffer):
             # convert dict to [(name, tensor)]
             buffer = self._buffer_weights[target_buffer]
+            if buffer is None:
+                return None
             return [(name, tensor) for name, tensor in buffer.items()]
 
         def wait_for_buffer_write(self):
@@ -541,11 +578,6 @@ class DualBufferAsyncEngine:
                     enhanced_print("DualBufferAsyncEngine", None, f"Buffer {buffer_id} not ready, cannot switch")
                     return False
                 
-                # First time cannot skip
-                # if buffer_id == self._active_buffer:
-                #     # Already in use, no need to switch again
-                #     return True
-
                 # Apply weights of new buffer to engine (only switch active_buffer and current_version after successful application)
                 t1 = time.time()
                 buffer = self._get_buffer(buffer_id)
@@ -571,15 +603,26 @@ class DualBufferAsyncEngine:
 
                 if success:
                     # Switch to new buffer and update current version
+                    old_active_buffer = self._active_buffer
                     self._active_buffer = buffer_id
                     self._current_version = self._buffer_versions[buffer_id]
-                    self._bufman.clear_buffer_metas(buffer_id)  # Clear buffer reference
+                    
+                    # Clear old buffer data to free memory
+                    if self._memory_efficient_mode:
+                        # Single buffer mode: only clear data, keep buffer state intact
+                        self._bufman.clear_buffer_data(buffer_id, reset_state=False)
+                        enhanced_print("DualBufferAsyncEngine", None, f"Memory efficient mode: cleared buffer {buffer_id} data (kept state intact)")
+                    else:
+                        # Dual buffer mode: clear the old active buffer completely
+                        if old_active_buffer != buffer_id:
+                            self._bufman.clear_buffer_data(old_active_buffer, reset_state=True)
+                            enhanced_print("DualBufferAsyncEngine", None, f"Dual buffer mode: cleared old buffer {old_active_buffer} completely after switching to {buffer_id}")
+                    
                     enhanced_print("DualBufferAsyncEngine", None, f"Successfully applied and switched to buffer {buffer_id} for version {self._current_version}")
                     return True
                 else:
                     enhanced_print("DualBufferAsyncEngine", None, f"Failed to apply weights from buffer {buffer_id} to engine; not switching")
                     return False
-        
         # Add methods to dynamically created class
         DualBufferAsyncEngineImpl.update_weights_from_tensor_sync = update_weights_from_tensor_sync
         DualBufferAsyncEngineImpl.update_buffer_data_only = update_buffer_data_only
