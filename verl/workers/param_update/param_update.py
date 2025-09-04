@@ -29,8 +29,8 @@ class ParamUpdateManager:
         layer_name_mapping,
         convert_qkv_gate_up_by_simple_split,
         enable_async_rl: bool = True,  # New: whether to enable async RL optimization
-        target_device: str = "cpu",  # New: target device, default is CPU
-        enable_param_sync: bool = True,  # New: whether to enable parameter synchronization
+        target_device: str = "cuda",  # Modified: default to GPU for sync mode
+        enable_param_async: bool = False,  # Modified: True=CPU async, False=NCCL GPU sync
         store_refs_queue = None,  # New: store refs queue
         param_update_preduce_bucket_size_mb: int = 512,  # New: parameter preprocessing bucket size
     ):
@@ -41,7 +41,7 @@ class ParamUpdateManager:
         self.transformer_config = transformer_config
         self.layer_name_mapping = layer_name_mapping
         self.target_device = target_device
-        self.enable_param_sync = enable_param_sync
+        self.enable_param_async = enable_param_async
         self.store_refs_queue = store_refs_queue
         
         # Async RL optimization switch
@@ -57,10 +57,14 @@ class ParamUpdateManager:
         # 1. Send stage bucket fusion granularity (train stage memory) - can be set larger
         self.send_bucket_size_mb = param_update_preduce_bucket_size_mb
         
-        enhanced_print("ParamUpdateManager", None, f"Bucket sizes: send={self.send_bucket_size_mb}MB")
+        enhanced_print("ParamUpdateManager", None, f"Bucket sizes: send={self.send_bucket_size_mb}MB, sync_mode={'CPU_async' if enable_param_async else 'NCCL_GPU_sync'}")
         
-        # Initialize parameter metadata
+        # Initialize parameter metadata and groups
         self._params_meta = []
+        self._param_groups = {}
+        
+        # Initialize parameter update completion flag for NCCL sync mode
+        self._param_update_completed = True  # Start as completed
         
         # Set default Ray collective name
         self.ray_col_name = "actor_rollout_sync"  # Dedicated parameter sync group name, avoid conflict with SGLang communication
@@ -115,14 +119,6 @@ class ParamUpdateManager:
         """Check if it's a generation master node"""
         return self.is_generation_node() and self.is_engine_master
     
-    def engine_idx(self):
-        """for global queue"""
-        return (self.rank - self.rank_offset) // self.engine_tp_size
-    
-    def one_to_all_nums(self):
-        """for global queue"""
-        return self.engine_nums
-    
     def setup_for_ray_col(self, rank: int, size: int, rank_offset: int, engine_nums: int, engine_tp_size: int, is_engine_master: bool, name: str, backend: str = "nccl"):
         """Setup Ray communication - choose different communication methods based on parameter sync mode"""
         try:
@@ -134,12 +130,12 @@ class ParamUpdateManager:
             self.is_engine_master = is_engine_master
             self.engine_tp_size = engine_tp_size
             
-            # Choose communication method based on parameter sync mode
-            if self.enable_param_sync:
-                # Async mode: use Ray put/get
-                enhanced_print("param_update", None, f"Ray put/get communication ready: rank={rank}, size={size}, name={name}")
+            # Choose communication method based on parameter async mode
+            if self.enable_param_async:
+                # CPU async mode: use Ray put/get
+                enhanced_print("param_update", None, f"Ray put/get CPU async communication ready: rank={rank}, size={size}, name={name}")
             else:
-                # Sync mode: use Ray Collective
+                # NCCL GPU sync mode: use Ray Collective
                 from ray.util.collective import init_collective_group
                 init_collective_group(
                     group_name=name,
@@ -147,12 +143,56 @@ class ParamUpdateManager:
                     rank=rank,
                     backend=backend,
                 )
-                enhanced_print("param_update", None, f"Ray Collective communication ready: rank={rank}, size={size}, name={name}, backend={backend}")
+                enhanced_print("param_update", None, f"Ray Collective NCCL GPU sync ready: rank={rank}, size={size}, name={name}, backend={backend}")
+                
+                # For NCCL GPU sync mode, also setup train-generate sync group
+                # This will be used for parameter synchronization between train and generate nodes
+                self.train_generate_sync_group = name  # Use the same group for parameter sync
             
             return True
                 
         except Exception as e:
             enhanced_print("param_update", None, f"Failed to setup Ray communication: {e}")
+            return False
+    
+    def setup_train_generate_sync_group(self, train_ranks: List[int], generate_ranks: List[int]):
+        """Setup NCCL communication group between train and generate nodes - all ranks participate"""
+        try:
+            # Create sync group between all train and generate nodes
+            sync_group_name = "train_generate_sync"
+            sync_ranks = train_ranks + generate_ranks
+            sync_size = len(sync_ranks)
+            
+            # Find current rank in sync group
+            sync_rank = -1
+            if self.rank in train_ranks:
+                # Train node: find position in train_ranks
+                for i, rank in enumerate(train_ranks):
+                    if rank == self.rank:
+                        sync_rank = i
+                        break
+            elif self.rank in generate_ranks:
+                # Generate node: find position in generate_ranks
+                for i, rank in enumerate(generate_ranks):
+                    if rank == self.rank:
+                        sync_rank = len(train_ranks) + i
+                        break
+            
+            if sync_rank >= 0:
+                from ray.util.collective import init_collective_group
+                init_collective_group(
+                    group_name=sync_group_name,
+                    world_size=sync_size,
+                    rank=sync_rank,
+                    backend="nccl",
+                )
+                self.train_generate_sync_group = sync_group_name
+                enhanced_print("param_update", None, f"Setup train-generate sync group: rank={sync_rank}, size={sync_size}, group={sync_group_name}")
+            
+            return True
+                
+        except Exception as e:
+            enhanced_print("param_update", None, f"Failed to setup train-generate sync group: {e}")
             return False
     
     def register_actor_clusters(self, train_ranks: List[int], generate_ranks: List[int], world_size: int):
@@ -166,7 +206,7 @@ class ParamUpdateManager:
     def get_communication_info(self) -> Dict[str, Any]:
         """Get communication information"""
         return {
-            "sync_mode": not self.enable_param_sync,
+            "async_mode": self.enable_param_async,
             "train_ranks": getattr(self, 'train_ranks', []),
             "generate_ranks": getattr(self, 'generate_ranks', []),
             "world_size": getattr(self, 'world_size', 0)
@@ -174,8 +214,11 @@ class ParamUpdateManager:
     
     def setup_logp_ref_logp_sync(self, logp_rank, ref_logp_rank, size):
         """Setup parameter synchronization for logp and ref_logp workers"""
-        if not self.enable_param_sync:
-            # Sync mode: use Ray Collective
+        if self.enable_param_async:
+            # CPU async mode: no additional communication group setup needed
+            enhanced_print("param_update", None, "CPU async mode: no additional communication groups needed for logp/ref_logp")
+        else:
+            # NCCL GPU sync mode: use Ray Collective
             from ray.util.collective import init_collective_group
             
             # Create independent communication groups for logp and ref_logp
@@ -199,10 +242,317 @@ class ParamUpdateManager:
             self.ref_logp_ray_col_name = ref_logp_group_name
             
             enhanced_print("param_update", None, f"Setup logp/ref_logp sync: logp_group={logp_group_name}, ref_logp_group={ref_logp_group_name}")
-        else:
-            # Async mode: no additional communication group setup needed
-            enhanced_print("param_update", None, "Async mode: no additional communication groups needed for logp/ref_logp")
     
+    def sync_param_update(self, func_call=None):
+        """GPU sync parameter update - avoid CPU OOM by using GPU memory and NCCL"""
+        start_time = time.time()
+        enhanced_print("param_update", None, "Starting GPU sync parameter update")
+        
+        # Set completion flag to False at the start
+        self._param_update_completed = False
+        
+        # Get groups info - different logic for train vs generation nodes
+        if self.is_train_node():
+            # Train nodes: generate params_meta from model_params
+            if not self._params_meta:
+                self.get_params_meta()
+        else:
+            # Generation nodes: use preset params_meta or get from train nodes
+            if not self._params_meta:
+                enhanced_print("param_update", None, "Generation node: no params_meta available")
+                self._param_update_completed = True  # Set to completed on failure
+                return False
+        
+        if not self._params_meta:
+            enhanced_print("param_update", None, "No parameter metadata available")
+            self._param_update_completed = True  # Set to completed on failure
+            return False
+        
+        # Get parameter groups for bucket processing
+        if not self._param_groups:
+            groups, group_tensor_count = self._group_tensors_by_metas()
+            # Convert groups list to dictionary with bucket names
+            self._param_groups = {}
+            for i, group in enumerate(groups):
+                bucket_name = f"bucket_{i}"
+                self._param_groups[bucket_name] = group
+        
+        # Process each bucket
+        for bucket_name, group in self._param_groups.items():
+            enhanced_print("param_update", None, f"Processing {bucket_name} ({len(group)} tensors)")
+            
+            # if self.is_train_master_node():
+            #     # Train master: gather all params and broadcast to all nodes
+            #     success = self._sync_send_bucket(group, bucket_name)
+            # elif self.is_generation_node():
+            #     # Generation node: receive params and load weights
+            #     success = self._sync_recv_bucket(group, bucket_name, func_call)
+            # else:
+            #     # Other train nodes: skip
+            #     success = self._sync_send_bucket(group, bucket_name)
+            
+            # All ranks participate in broadcast
+            success = self._sync_broadcast_bucket(group, bucket_name, func_call)
+            if not success:
+                enhanced_print("param_update", None, f"Failed {bucket_name}")
+                self._param_update_completed = True  # Set to completed on failure
+                return False
+            enhanced_print("param_update", None, f"Completed {bucket_name}")
+        
+        # Clear GPU cache after all buckets are processed
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            enhanced_print("param_update", None, "Cleared GPU cache after parameter update")
+        
+        end_time = time.time()
+        enhanced_print("param_update", None, f"GPU sync parameter update completed in {end_time - start_time:.2f} seconds")
+        
+        # Set completion flag to True at the end
+        self._param_update_completed = True
+        return True
+    
+    def _sync_broadcast_bucket(self, group, bucket_name, func_call):
+        """All ranks participate in broadcast - optimized with tensor concatenation"""
+        from ray.util.collective import broadcast
+        
+        if self.is_train_node():
+            # All train nodes: collect and concatenate tensors
+            tensors = []
+            tensor_names = []
+            tensor_shapes = []
+            tensor_dtypes = []
+            
+            # Create generator once and iterate through it efficiently
+            per_tensor_param = self.get_params_iter(self.target_device, use_bucketed=False)
+            if per_tensor_param is None:
+                enhanced_print("param_update", None, f"Error: per_tensor_param returned None for {bucket_name}")
+                return False
+            
+            # Create a set of names we need for this bucket
+            needed_names = {meta["name"] for meta in group}
+            
+            # Iterate through generator and collect only needed tensors
+            for param_name, tensor in per_tensor_param:
+                if param_name in needed_names:
+                    # Ensure tensor is on GPU and flatten
+                    if tensor.device.type != 'cuda':
+                        tensor = tensor.cuda()
+                    tensors.append(tensor.flatten())
+                    tensor_names.append(param_name)
+                    tensor_shapes.append(tensor.shape)
+                    tensor_dtypes.append(tensor.dtype)
+            
+            # Check if we found all needed tensors
+            found_names = set(tensor_names)
+            missing_names = needed_names - found_names
+            if missing_names:
+                enhanced_print("param_update", None, f"ERROR: missing tensors {missing_names} for {bucket_name}")
+                return False
+            
+            # Check if all tensors have the same dtype
+            unique_dtypes = set(tensor_dtypes)
+            if len(unique_dtypes) == 1:
+                # All tensors have the same dtype, can concatenate directly
+                concatenated_tensor = torch.cat(tensors, dim=0)
+            else:
+                # Different dtypes, need to convert to a common dtype (e.g., float32)
+                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, converting to float32")
+                converted_tensors = [t.float() for t in tensors]
+                concatenated_tensor = torch.cat(converted_tensors, dim=0)
+            
+            # Broadcast the concatenated tensor
+            broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+            
+            if self.verbose_logging:
+                enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
+            
+            # Clear memory after broadcast
+            for tensor in tensors:
+                del tensor
+            del concatenated_tensor
+            del tensors
+            
+            # Force garbage collection and clear cache
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Wait for all operations to complete
+        else:
+            # Generation nodes: receive concatenated tensor
+            # Calculate total size needed for concatenated tensor
+            total_size = 0
+            for meta in group:
+                shape = meta["shape"]
+                total_size += torch.prod(torch.tensor(shape)).item()
+            
+            # Check if all tensors in group have the same dtype
+            unique_dtypes = set(meta["dtype"] for meta in group)
+            if len(unique_dtypes) == 1:
+                # All tensors have the same dtype
+                first_dtype = group[0]["dtype"]
+                concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
+            else:
+                # Mixed dtypes, use float32 as common dtype
+                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using float32")
+                concatenated_tensor = torch.zeros(total_size, dtype=torch.float32, device="cuda")
+            
+            broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+            
+            # Split the concatenated tensor back into individual tensors
+            received_tensors = []
+            start_idx = 0
+            for i, meta in enumerate(group):
+                name = meta["name"]
+                shape = meta["shape"]
+                dtype = meta["dtype"]
+                
+                tensor_size = torch.prod(torch.tensor(shape)).item()
+                tensor_data = concatenated_tensor[start_idx:start_idx + tensor_size]
+                tensor = tensor_data.reshape(shape).to(dtype)
+                received_tensors.append((name, tensor))
+                start_idx += tensor_size
+            
+            if self.verbose_logging:
+                enhanced_print("param_update", None, f"Received and split {len(received_tensors)} tensors in {bucket_name}")
+        
+        # Load weights immediately to avoid memory accumulation (only for generation nodes)
+        if self.is_generation_node() and func_call and received_tensors:
+            func_call(received_tensors, version=0, group_tensor_count=len(received_tensors))
+            enhanced_print("param_update", None, f"Loaded weights for {bucket_name}")
+            
+            # More aggressive memory cleanup
+            for name, tensor in received_tensors:
+                del tensor
+            del received_tensors
+            del concatenated_tensor
+            
+            # Force garbage collection and clear cache
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Wait for all operations to complete
+        
+        return True
+
+    
+    def _sync_send_bucket(self, group, bucket_name):
+        """Train master: gather all params and broadcast to all nodes"""
+        try:
+            # Get parameter tensors for this bucket
+            bucket_tensors = []
+            for meta in group:
+                name = meta["name"]
+                # Get tensor from model params
+                tensor = self._get_tensor_by_name(name)
+                if tensor is not None:
+                    # Ensure tensor is on GPU
+                    if tensor.device.type != 'cuda':
+                        tensor = tensor.cuda()
+                    bucket_tensors.append((name, tensor))
+            
+            if not bucket_tensors:
+                enhanced_print("param_update", None, f"No tensors found for {bucket_name}")
+                return True
+            
+            # Use Ray Collective to broadcast to all nodes
+            from ray.util.collective import broadcast
+            
+            # Broadcast each tensor in the bucket
+            for name, tensor in bucket_tensors:
+                broadcast(tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+                if self.verbose_logging:
+                    enhanced_print("param_update", None, f"Broadcasted {name} in {bucket_name}")
+            
+            return True
+            
+        except Exception as e:
+            enhanced_print("param_update", None, f"Error in _sync_send_bucket for {bucket_name}: {e}")
+            return False
+    
+    def _sync_recv_bucket(self, group, bucket_name, func_call):
+        """Generation node: receive params and load weights"""
+        try:
+            # Receive parameter tensors for this bucket
+            received_tensors = []
+            for meta in group:
+                name = meta["name"]
+                # Create tensor with same shape and dtype
+                tensor = torch.zeros(meta["shape"], dtype=meta["dtype"], device="cuda")
+                
+                # Receive tensor from train master
+                from ray.util.collective import broadcast
+                broadcast(tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+                
+                received_tensors.append((name, tensor))
+                if self.verbose_logging:
+                    enhanced_print("param_update", None, f"Received {name} in {bucket_name}")
+            
+            # Load weights immediately to avoid memory accumulation
+            if func_call and received_tensors:
+                func_call(received_tensors, version=0, group_tensor_count=len(received_tensors))
+                enhanced_print("param_update", None, f"Loaded weights for {bucket_name}")
+            
+            return True
+            
+        except Exception as e:
+            enhanced_print("param_update", None, f"Error in _sync_recv_bucket for {bucket_name}: {e}")
+            return False
+    
+    def _get_tensor_by_name(self, name):
+        """Get tensor by name from model parameters"""
+        # Use the existing parameter iterator to get tensor
+        per_tensor_param = self.get_params_iter(self.target_device, use_bucketed=False)
+        for param_name, tensor in per_tensor_param:
+            if param_name == name and tensor is not None:
+                return tensor
+    
+    def sync_per_tensor_generator(self, func_call=None):
+        """Choose parameter synchronization method based on enable_param_async"""
+        if self.enable_param_async:
+            # Use CPU async method (legacy)
+            enhanced_print("param_update", None, "Using CPU async parameter update")
+            return self.async_param_update_legacy(func_call)
+        else:
+            # Use NCCL GPU sync method
+            enhanced_print("param_update", None, "Using NCCL GPU sync parameter update")
+            return self.sync_param_update(func_call)
+    
+    def async_param_update_legacy(self, func_call=None, sync_send=False):
+        """Legacy CPU async parameter update - use only when enable_param_async=True"""
+        start_time = time.time()
+        enhanced_print("param_update", None, "Starting CPU async parameter update")
+        
+        # First get groups info, ensure send and recv use same grouping
+        if not self._params_meta:
+            self.get_params_meta()
+        
+        # If no func_call provided, use default update_buffer_data_only method
+        if func_call is None:
+            # Need to get correct func_call from external, temporarily use a placeholder
+            func_call = lambda named_tensors, version: True
+        
+        # Record start time for later statistics
+        self._param_update_start_time = start_time
+
+        # Start async send
+        self._start_async_send()
+        
+        # Wait a bit to ensure send thread starts working
+        time.sleep(0.1)
+        
+        # Start async receive
+        self._start_async_recv(func_call)
+
+        if sync_send:
+            self.wait_for_send_complete()
+    
+    def async_param_update(self, func_call=None, sync_send=False):
+        """Deprecated: Use sync_per_tensor_generator instead"""
+        enhanced_print("param_update", None, "async_param_update is deprecated, using sync_per_tensor_generator instead")
+        return self.sync_per_tensor_generator(func_call)
+
     def get_params_iter(self, target_device="cpu", use_bucketed=False):
         """Get an iterator for the current parameters."""
         # Check if model_params exists (only train nodes have)
@@ -402,10 +752,6 @@ class ParamUpdateManager:
             traceback.print_exc()
             raise e
 
-    def sync_per_tensor_generator(self, func_call=None):
-        """Use new async parameter synchronization implementation"""
-        return self.async_param_update(func_call)
-
     def _group_tensors_by_metas(self):
         """Simplified tensor grouping strategy - use synchronized params_meta to ensure consistency"""
         if not self._params_meta:
@@ -461,43 +807,43 @@ class ParamUpdateManager:
         """Calculate the size of a tensor."""
         return meta["size"]
 
-    def async_param_update(self, func_call=None, sync_send=False):
-        """Async parameter update - start async send and receive"""
-        start_time = time.time()
-        # enhanced_print("param_update", None, "Starting async parameter update")
-        
-        # First get groups info, ensure send and recv use same grouping
-        if not self._params_meta:
-            self.get_params_meta()
-        
-        # If no func_call provided, use default update_buffer_data_only method
-        if func_call is None:
-            # Need to get correct func_call from external, temporarily use a placeholder
-            func_call = lambda named_tensors, version: True
-        
-        # Record start time for later statistics
-        self._param_update_start_time = start_time
+    def _execute_async_func_call(self, func_call, named_tensors):
+        """Execute async func_call"""
+        result = func_call(named_tensors)
+        return result
 
-        # Start async send
-        self._start_async_send()
+    def _async_recv_bucket_with_store_ref(self, store_ref, version, bucket_name, func_call, group_tensor_count):
+        """Async recv single bucket - receive data and update buffer"""
         
-        # Wait a bit to ensure send thread starts working
-        time.sleep(0.1)
+        # Check if store_ref is valid
+        if not store_ref:
+            enhanced_print("param_update", None, f"Async recv: no store_ref provided for {bucket_name}")
+            return False
+
+        get_start_time = time.time()
+
+        # [(name, tensor)]
+        received_tensors = cross_process_ray_get(store_ref)
         
-        # Start async receive
-        self._start_async_recv(func_call)
-
-        if sync_send:
-            self.wait_for_send_complete()
-
-    # Block wait for send to complete
-    def wait_for_send_complete(self):
-        if hasattr(self, '_async_send_thread') and self._async_send_thread.is_alive():
-            self._async_send_thread.join()
-
-    def wait_for_recv_complete(self):
-        if hasattr(self, '_async_recv_thread') and self._async_recv_thread.is_alive():
-            self._async_recv_thread.join()
+        get_time = time.time() - get_start_time
+        
+        if not received_tensors:
+            enhanced_print("param_update", None, f"Async recv: no data available for version {version}")
+            return False
+        
+        if self.verbose_logging:
+            enhanced_print("param_update", None, f"Async recv: Ray get {len(received_tensors)} tensors completed for {bucket_name} (version {version}) in {get_time:.3f}s")
+        
+        named_tensors = received_tensors
+        
+        # Update buffer data
+        if func_call and named_tensors:            
+            # Directly call func_call to update buffer data
+            buffer_success = func_call(named_tensors, version, group_tensor_count)
+            
+            return buffer_success
+        
+        return True
 
     def _start_async_send(self):
         """Start async send thread"""
@@ -574,14 +920,14 @@ class ParamUpdateManager:
     @torch.no_grad()
     def _async_recv_worker(self, func_call):
         """Async recv worker"""
-        enhanced_print("param_update", None, "Async recv worker started")
-        
         t1 = time.time()
         
         if not self.is_generation_master_node():
             # Non-generator master node, no receive operation
             return True
-        
+
+        enhanced_print("param_update", None, "Async recv worker started")
+
         # Get parameter metadata
         if not self._params_meta:
             self.get_params_meta()
@@ -607,7 +953,6 @@ class ParamUpdateManager:
             store_ref = None
             if self.store_refs_queue is not None:
                 # Get object_refs info from queue, use blocking mode
-                # enhanced_print("param_update", None, f"i:{i}, rank:{self.rank}, Async recv: waiting for queue_data for {bucket_name}, idx: {self.engine_idx()} queue size: {self.store_refs_queue[self.engine_idx()].qsize()}")
                 queue_data = self.store_refs_queue[self.engine_idx()].get()  # 阻塞模式，无timeout
                 if self.verbose_logging:
                     enhanced_print("param_update", None, f"Async recv: got queue_data for {queue_data.get('bucket_name') if queue_data else 'None'}, expecting {bucket_name}")
@@ -646,7 +991,7 @@ class ParamUpdateManager:
         enhanced_print("param_update", None, f"Async recv: completed {success_count}/{len(groups)} buckets(version:{version}), cost time:{t2-t1:.2f}, worker thread ending")
 
     def _async_send_bucket(self, bucket_tensors, ray_rank, bucket_name, version=None):
-        """Async send single bucket - train node (using Ray Collective)"""
+        """Async send single bucket - train node (using Ray put/get)"""
         if self.verbose_logging:
             enhanced_print("param_update", None, f"Async send: starting {bucket_name} with {len(bucket_tensors)} tensors")
         
@@ -699,56 +1044,50 @@ class ParamUpdateManager:
         
         # Store object_refs to store_refs_queue, for recv thread to use
         if self.store_refs_queue is not None and object_refs:
-            # TOOD: Here can be optimized, temporarily use put multiple times;
-            # print(f"rank:{self.rank}, len of self.store_refs_queue:{len(self.store_refs_queue)}")
             for queue_idx in range(len(self.store_refs_queue)):
-                # enhanced_print("param_update", None, f"rank:{self.rank}, Async send: storing object_refs for {bucket_name}, idx:{queue_idx} queue size={self.store_refs_queue[queue_idx].qsize()}, bucket_name:{bucket_name}")
                 self.store_refs_queue[queue_idx].put({
                     'bucket_name': bucket_name,
                     'version': version,
                     'object_refs': object_refs
                 })
-            # enhanced_print("param_update", None, f"Async send: stored object_refs for {bucket_name} x {len(self.store_refs_queue)} queues")
         
         if self.verbose_logging:
             enhanced_print("param_update", None, f"Async send: {bucket_name} sent successfully")
         
         return True
 
-    def _execute_async_func_call(self, func_call, named_tensors):
-        """Execute async func_call"""
-        result = func_call(named_tensors)
-        return result
+    def wait_for_send_complete(self):
+        """Block wait for send to complete"""
+        if not self.enable_param_async:
+            # NCCL GPU sync mode: no async threads, just add barrier
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+                enhanced_print("param_update", None, "All nodes completed send phase (NCCL sync mode)")
+            return
+        
+        # CPU async mode: wait for async send thread
+        if hasattr(self, '_async_send_thread') and self._async_send_thread.is_alive():
+            self._async_send_thread.join()
+        
+        # Add distributed barrier to ensure all nodes complete send before proceeding
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            enhanced_print("param_update", None, "All nodes completed send phase")
 
-    def _async_recv_bucket_with_store_ref(self, store_ref, version, bucket_name, func_call, group_tensor_count):
-        """Async recv single bucket - receive data and update buffer"""
+    def wait_for_recv_complete(self):
+        """Block wait for recv to complete"""
+        if not self.enable_param_async:
+            # NCCL GPU sync mode: wait for parameter update completion flag
+            while not self._param_update_completed:
+                time.sleep(0.1)  # Small sleep to avoid busy waiting
+            enhanced_print("param_update", None, "NCCL sync mode: parameter update completed")
+            return
         
-        # Check if store_ref is valid
-        if not store_ref:
-            enhanced_print("param_update", None, f"Async recv: no store_ref provided for {bucket_name}")
-            return False
+        # CPU async mode: wait for async recv thread
+        if hasattr(self, '_async_recv_thread') and self._async_recv_thread.is_alive():
+            self._async_recv_thread.join()
 
-        get_start_time = time.time()
-
-        # [(name, tensor)]
-        received_tensors = cross_process_ray_get(store_ref)
-        
-        get_time = time.time() - get_start_time
-        
-        if not received_tensors:
-            enhanced_print("param_update", None, f"Async recv: no data available for version {version}")
-            return False
-        
-        if self.verbose_logging:
-            enhanced_print("param_update", None, f"Async recv: Ray get {len(received_tensors)} tensors completed for {bucket_name} (version {version}) in {get_time:.3f}s")
-        
-        named_tensors = received_tensors
-        
-        # Update buffer data
-        if func_call and named_tensors:            
-            # Directly call func_call to update buffer data
-            buffer_success = func_call(named_tensors, version, group_tensor_count)
-            
-            return buffer_success
-        
-        return True
+        # Add distributed barrier to ensure all nodes complete recv before proceeding
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            enhanced_print("param_update", None, "All nodes completed recv phase")

@@ -478,6 +478,8 @@ class SGLangRollout(BaseRollout):
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
             enable_dual_buffer = getattr(self.config, 'enable_dual_buffer', False)
+            enable_param_async = getattr(self.config, 'enable_param_async', False)
+            
             if enable_dual_buffer:
                 print(f"[SGLangRollout] Initializing DualBufferAsyncEngine for dual buffer optimization")
                 from .dual_buffer_engine import DualBufferAsyncEngine
@@ -511,11 +513,14 @@ class SGLangRollout(BaseRollout):
                     # In async mode for AgentLoop, SGLang support token in token out to avoid the tokenizer
                     # inconsistency issue.
                     skip_tokenizer_init=self.config.mode == "async",
+                    enable_param_async=enable_param_async,
                     bucket_size_mb=buffer_bucket_size_mb,
                     memory_efficient_mode=memory_efficient_mode,
                     **engine_kwargs,
                 )
-                print(f"[SGLangRollout] DualBufferAsyncEngine initialized successfully")
+                # Set sharding_manager after engine creation (if available)
+                if self.sharding_manager is not None:
+                    self._engine.sharding_manager = self.sharding_manager
             else:
                 print(f"[SGLangRollout] Initializing standard AsyncEngine")
                 self._engine = AsyncEngine(

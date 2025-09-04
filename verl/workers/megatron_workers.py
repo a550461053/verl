@@ -526,6 +526,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 layer_name_mapping=layer_name_mapping,
                 convert_qkv_gate_up_by_simple_split=True,
                 param_update_preduce_bucket_size_mb=self.config.actor.get("param_update_preduce_bucket_size_mb", 512),
+                enable_param_async=self.config.rollout.get("enable_param_async", False),
             )
             
             # Register actor clusters (if configured)
@@ -750,6 +751,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
             # used for sleep/wake_up
             self.rollout.sharding_manager = self.sharding_manager
+            # Also set sharding_manager to engine if it's DualBufferAsyncEngine
+            if hasattr(self.rollout._engine, 'sharding_manager'):
+                self.rollout._engine.sharding_manager = self.sharding_manager
             log_gpu_memory_usage("After rollout init", logger=logger)
 
         if self._is_ref:
@@ -1313,6 +1317,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
         )
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
+
         (
             self.critic_module,
             self.critic_optimizer,

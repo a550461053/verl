@@ -109,6 +109,7 @@ class RolloutConfig(BaseConfig):
     
     # add by async-rl
     enable_dual_buffer: bool = False
+    enable_param_async: bool = False
     param_update_preduce_bucket_size_mb: int = 512
     param_update_consume_bucket_size_mb: int = 128
 
