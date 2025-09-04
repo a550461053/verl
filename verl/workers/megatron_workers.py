@@ -889,6 +889,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if hasattr(self.param_update_manager, "wait_for_send_complete"):
             self.param_update_manager.wait_for_send_complete()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
+    @GPUMemoryLogger(role="wait_for_recv_complete", logger=logger)
+    def wait_for_recv_complete(self):
+        if hasattr(self.param_update_manager, "wait_for_recv_complete"):
+            self.param_update_manager.wait_for_recv_complete()
+
     @register(dispatch_mode=Dispatch.ALL_TO_ONE, execute_mode=Execute.ALL)
     @GPUMemoryLogger(role="get_params_meta", logger=logger)
     def get_params_meta(self):

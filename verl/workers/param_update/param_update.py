@@ -495,6 +495,10 @@ class ParamUpdateManager:
         if hasattr(self, '_async_send_thread') and self._async_send_thread.is_alive():
             self._async_send_thread.join()
 
+    def wait_for_recv_complete(self):
+        if hasattr(self, '_async_recv_thread') and self._async_recv_thread.is_alive():
+            self._async_recv_thread.join()
+
     def _start_async_send(self):
         """Start async send thread"""
         if not hasattr(self, '_async_send_thread') or not self._async_send_thread.is_alive():

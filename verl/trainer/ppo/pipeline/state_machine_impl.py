@@ -918,11 +918,16 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         start_time = time.time()
         if self.has_param_update_manager:
-            param_update_task = asyncio.create_task(
-                self._perform_async_param_update_background(global_steps)
+            # Create separate send and recv tasks for better dependency handling
+            send_task = asyncio.create_task(
+                self._perform_async_param_update_send_phase(global_steps)
+            )
+            recv_task = asyncio.create_task(
+                self._perform_async_param_update_recv_phase(global_steps)
             )
             self.stats["async_updates"] += 1
-            enhanced_print("param_update", None, f"Async param update task created for step {global_steps}")
+            enhanced_print("param_update", None, f"Async param update send/recv tasks created for step {global_steps}")
+            param_update_task = (send_task, recv_task)
         else:
             param_update_task = asyncio.create_task(
                 asyncio.to_thread(self._perform_sync_param_update_background, global_steps)
@@ -937,9 +942,9 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         return (global_steps, param_update_task)
 
-    async def _perform_async_param_update_background(self, global_steps: int) -> bool:
-        """async parameter update """
-        enhanced_print("param_update", None, f"Background async param update started for step {global_steps}")
+    async def _perform_async_param_update_send_phase(self, global_steps: int) -> bool:
+        """async parameter update - send phase only"""
+        enhanced_print("param_update", None, f"Background async param update send phase started for step {global_steps}")
 
         await resource_lock.acquire("param_update", global_steps)
 
@@ -948,23 +953,46 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         self.trainer.actor_wg.async_param_update()
         self.trainer.rollout_wg.async_param_update()
         
-        # waitingsendcompleted
+        # waiting send completed
         self.trainer.actor_wg.wait_for_send_complete()
-        
-        update_time = time.time() - start_time
+
+        send_time = time.time() - start_time
 
         self.stats["updates"] += 1
-        self.stats["total_time"] += update_time
+        self.stats["total_time"] += send_time
         self.stats["avg_time"] = self.stats["total_time"] / self.stats["updates"]
-        self.stats["min_time"] = min(self.stats["min_time"], update_time)
-        self.stats["max_time"] = max(self.stats["max_time"], update_time)
+        self.stats["min_time"] = min(self.stats["min_time"], send_time)
+        self.stats["max_time"] = max(self.stats["max_time"], send_time)
         
         enhanced_print("param_update", None, 
-                        f"Background async param update completed for step {global_steps} in {update_time:.3f}s")
+                        f"Background async param update send phase completed for step {global_steps} in {send_time:.3f}s")
         
         await resource_lock.release("param_update", global_steps)
 
         return True
+
+    async def _perform_async_param_update_recv_phase(self, global_steps: int) -> bool:
+        """async parameter update - recv phase only"""
+        enhanced_print("param_update", None, f"Background async param update recv phase started for step {global_steps}")
+
+        # waiting recv completed
+        self.trainer.rollout_wg.wait_for_recv_complete()
+        
+        enhanced_print("param_update", None, 
+                        f"Background async param update recv phase completed for step {global_steps}")
+
+        return True
+
+    async def _perform_async_param_update_background(self, global_steps: int) -> bool:
+        """async parameter update - complete process (for backward compatibility)"""
+        # Send phase
+        send_success = await self._perform_async_param_update_send_phase(global_steps)
+        if not send_success:
+            return False
+        
+        # Recv phase
+        recv_success = await self._perform_async_param_update_recv_phase(global_steps)
+        return recv_success
             
 
     async def _perform_sync_param_update_background(self, global_steps: int) -> bool:
@@ -1006,7 +1034,7 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
 
     async def send_output_data(self, data: Any) -> bool:
-        """send update completed"""
+        """send update completed with optimized dependencies"""
         if data == "END":
             enhanced_print("param_update", None, "Async param update completed, END signal processed")
             await self.pipeline.push("param_update", "generate", PIPELINE_END_SIGNAL)
@@ -1016,24 +1044,55 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         if isinstance(data, tuple) and len(data) == 2:
             global_steps, param_update_task = data
-            enhanced_print("param_update", None, f"Waiting for background param update task to complete for step {global_steps}")
+            enhanced_print("param_update", None, f"Processing param update tasks for step {global_steps}")
 
-            success = await param_update_task
-            if success:
-                enhanced_print("param_update", None, f"Background param update completed for step {global_steps}")
+            # Handle separate send/recv tasks for async updates
+            if isinstance(param_update_task, tuple) and len(param_update_task) == 2:
+                send_task, recv_task = param_update_task
+                
+                # Wait for send phase completion (for logp)
+                send_success = await send_task
+                if send_success:
+                    enhanced_print("param_update", None, f"Background param update send phase completed for step {global_steps}")
+                    
+                    # Send signal to logp (only needs send completion)
+                    if not self.trainer.config.trainer.get("sperated_train_logp", False):
+                        await self.pipeline.push("param_update", "logp", global_steps)
+                        enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps} (after send complete)")
+                else:
+                    enhanced_print("param_update", None, f"Background param update send phase failed for step {global_steps}")
+                    return False
+                
+                # Wait for recv phase completion (for generate)
+                recv_success = await recv_task
+                if recv_success:
+                    enhanced_print("param_update", None, f"Background param update recv phase completed for step {global_steps}")
+                    
+                    # Send signal to generate (needs recv completion)
+                    enhanced_print("param_update", None, f"Sending completion signal to generate for step {global_steps}")
+                    await self.pipeline.push("param_update", "generate", global_steps)
+                    enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps} (after recv complete)")
+                else:
+                    enhanced_print("param_update", None, f"Background param update recv phase failed for step {global_steps}")
+                    return False
             else:
-                enhanced_print("param_update", None, f"Background param update failed for step {global_steps}")
+                # Handle single task for sync updates
+                success = await param_update_task
+                if success:
+                    enhanced_print("param_update", None, f"Background param update completed for step {global_steps}")
+                    
+                    # Send signals to both logp and generate (sync update completes both phases)
+                    if not self.trainer.config.trainer.get("sperated_train_logp", False):
+                        await self.pipeline.push("param_update", "logp", global_steps)
+                        enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps}")
+                    
+                    await self.pipeline.push("param_update", "generate", global_steps)
+                    enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps}")
+                else:
+                    enhanced_print("param_update", None, f"Background param update failed for step {global_steps}")
+                    return False
         else:
             global_steps = data
-
-        enhanced_print("param_update", None, f"Sending completion signal to generate for step {global_steps}")
-        await self.pipeline.push("param_update", "generate", global_steps)
-        enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps}")
-        
-        # Send signal to logp to continue (unless separated deployment)
-        if not self.trainer.config.trainer.get("sperated_train_logp", False):
-            await self.pipeline.push("param_update", "logp", global_steps)
-            enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps}")
         
         return True
     
