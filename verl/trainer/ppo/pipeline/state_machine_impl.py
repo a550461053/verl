@@ -917,36 +917,44 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         enhanced_print("param_update", None, f"Starting param update for step {global_steps}")
         
         start_time = time.time()
-        if self.has_param_update_manager:
-            # Create separate send and recv tasks for better dependency handling
+
+        # For NCCL sync mode, use await instead of create_task to ensure blocking execution
+        enable_param_async = getattr(self.trainer.config.actor_rollout_ref.rollout, 'enable_param_async', False)
+        if not enable_param_async:
+            # NCCL sync mode: use await for blocking execution
+            await engine_resource_lock.acquire("param_update")
+            await resource_lock.acquire("param_update", global_steps)
+            send_success = await self._perform_async_param_update_send_phase(global_steps)
+            recv_success = await self._perform_async_param_update_recv_phase(global_steps)
+            await resource_lock.release("param_update", global_steps)
+            await engine_resource_lock.release("param_update")
+            param_update_task = ("sync", send_success, recv_success)  # Add mode indicator
+        else:
+            # CPU async mode: use create_task for async execution
             send_task = asyncio.create_task(
                 self._perform_async_param_update_send_phase(global_steps)
             )
             recv_task = asyncio.create_task(
                 self._perform_async_param_update_recv_phase(global_steps)
             )
-            self.stats["async_updates"] += 1
-            enhanced_print("param_update", None, f"Async param update send/recv tasks created for step {global_steps}")
-            param_update_task = (send_task, recv_task)
-        else:
-            param_update_task = asyncio.create_task(
-                asyncio.to_thread(self._perform_sync_param_update_background, global_steps)
-            )
-            self.stats["sync_updates"] += 1
-            enhanced_print("param_update", None, f"Sync param update task created for step {global_steps}")
-        
+            param_update_task = ("async", send_task, recv_task)  # Add mode indicator
+
+        self.stats["async_updates"] += 1
+        enhanced_print("param_update", None, f"Param update async:{enable_param_async} tasks created for step {global_steps}")
+
         task_creation_time = time.time() - start_time
 
         enhanced_print("param_update", None, 
-                        f"Param update task created for step {global_steps} in {task_creation_time:.3f}s (background execution)")
+                        f"Param update task created for step {global_steps} in {task_creation_time:.3f}s")
         
         return (global_steps, param_update_task)
 
-    async def _perform_async_param_update_send_phase(self, global_steps: int) -> bool:
+    async def _perform_async_param_update_send_phase(self, global_steps: int, resource_lock_enable=True) -> bool:
         """async parameter update - send phase only"""
         enhanced_print("param_update", None, f"Background async param update send phase started for step {global_steps}")
 
-        await resource_lock.acquire("param_update", global_steps)
+        if resource_lock_enable:
+            await resource_lock.acquire("param_update", global_steps)
 
         start_time = time.time()
 
@@ -955,16 +963,6 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         
         # waiting send completed
         self.trainer.actor_wg.wait_for_send_complete()
-        
-        # In NCCL sync mode, also wait for recv to complete to ensure all broadcast operations are done
-        # Check if using NCCL sync mode (enable_param_async=False)
-        if hasattr(self.trainer.actor_wg.workers[0], 'param_update_manager'):
-            enable_param_async = getattr(self.trainer.actor_wg.workers[0].param_update_manager, 'enable_param_async', True)
-            if not enable_param_async:
-                # NCCL sync mode: wait for recv to complete
-                self.trainer.actor_wg.wait_for_recv_complete()
-                self.trainer.rollout_wg.wait_for_recv_complete()
-                enhanced_print("param_update", None, f"NCCL sync mode: waited for recv completion for step {global_steps}")
 
         send_time = time.time() - start_time
 
@@ -977,7 +975,8 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         enhanced_print("param_update", None, 
                         f"Background async param update send phase completed for step {global_steps} in {send_time:.3f}s")
         
-        await resource_lock.release("param_update", global_steps)
+        if resource_lock_enable:
+            await resource_lock.release("param_update", global_steps)
 
         return True
 
@@ -1003,45 +1002,6 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
         # Recv phase
         recv_success = await self._perform_async_param_update_recv_phase(global_steps)
         return recv_success
-            
-
-    async def _perform_sync_param_update_background(self, global_steps: int) -> bool:
-        enhanced_print("param_update", None, f"Background sync param update started for step {global_steps}")
-        
-        await resource_lock.acquire("param_update", global_steps)
-        
-        start_time = time.time()
-        
-        def sync_param_update():
-            enhanced_print("param_update", None, f"Syncing actor parameters for step {global_steps}...")
-            actor_result = self.trainer.actor_wg.sync_per_tensor_generator()
-            
-            enhanced_print("param_update", None, f"Syncing rollout parameters for step {global_steps}...")
-            rollout_result = self.trainer.rollout_wg.sync_per_tensor_generator()
-            
-            if hasattr(rollout_result, '__class__') and 'ObjectRef' in str(type(rollout_result)):
-                ray.get(rollout_result)
-            
-            enhanced_print("param_update", None, f"Parameter sync completed for step {global_steps}")
-            return True
-        
-        success = await asyncio.to_thread(sync_param_update)
-        
-        update_time = time.time() - start_time
-        
-        self.stats["updates"] += 1
-        self.stats["total_time"] += update_time
-        self.stats["avg_time"] = self.stats["total_time"] / self.stats["updates"]
-        self.stats["min_time"] = min(self.stats["min_time"], update_time)
-        self.stats["max_time"] = max(self.stats["max_time"], update_time)
-        
-        enhanced_print("param_update", None, 
-                        f"Background sync param update completed for step {global_steps} in {update_time:.3f}s")
-        
-        await resource_lock.release("param_update", global_steps)
-        
-        return success
-        
 
     async def send_output_data(self, data: Any) -> bool:
         """send update completed with optimized dependencies"""
@@ -1057,34 +1017,48 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
             enhanced_print("param_update", None, f"Processing param update tasks for step {global_steps}")
 
             # Handle separate send/recv tasks for async updates
-            if isinstance(param_update_task, tuple) and len(param_update_task) == 2:
-                send_task, recv_task = param_update_task
-                
-                # Wait for send phase completion (for logp)
-                send_success = await send_task
-                if send_success:
-                    enhanced_print("param_update", None, f"Background param update send phase completed for step {global_steps}")
+            if isinstance(param_update_task, tuple) and len(param_update_task) >= 2:
+                mode = param_update_task[0]
+                if mode == "sync":
+                    # NCCL sync mode: param_update_task is (mode, send_success, recv_success)
+                    _, send_success, recv_success = param_update_task
+                    if send_success:
+                        enhanced_print("param_update", None, f"Sync param update send phase completed for step {global_steps}")
+                        
+                        # Send signal to logp (only needs send completion)
+                        if not self.trainer.config.trainer.get("sperated_train_logp", False):
+                            await self.pipeline.push("param_update", "logp", global_steps)
+                            enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps} (after send complete)")
                     
-                    # Send signal to logp (only needs send completion)
-                    if not self.trainer.config.trainer.get("sperated_train_logp", False):
-                        await self.pipeline.push("param_update", "logp", global_steps)
-                        enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps} (after send complete)")
+                    # In NCCL sync mode, recv is already completed, so we can directly proceed
+                    if recv_success:
+                        enhanced_print("param_update", None, f"Sync param update recv phase completed for step {global_steps}")
+                        
+                        # Send signal to generate (needs recv completion)
+                        await self.pipeline.push("param_update", "generate", global_steps)
+                        enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps} (after recv complete)")
                 else:
-                    enhanced_print("param_update", None, f"Background param update send phase failed for step {global_steps}")
-                    return False
-                
-                # Wait for recv phase completion (for generate)
-                recv_success = await recv_task
-                if recv_success:
-                    enhanced_print("param_update", None, f"Background param update recv phase completed for step {global_steps}")
+                    # CPU async mode: param_update_task is (mode, send_task, recv_task)
+                    _, send_task, recv_task = param_update_task
                     
-                    # Send signal to generate (needs recv completion)
-                    enhanced_print("param_update", None, f"Sending completion signal to generate for step {global_steps}")
-                    await self.pipeline.push("param_update", "generate", global_steps)
-                    enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps} (after recv complete)")
-                else:
-                    enhanced_print("param_update", None, f"Background param update recv phase failed for step {global_steps}")
-                    return False
+                    # Wait for send phase completion (for logp)
+                    send_success = await send_task
+                    if send_success:
+                        enhanced_print("param_update", None, f"Background param update send phase completed for step {global_steps}")
+                        
+                        # Send signal to logp (only needs send completion)
+                        if not self.trainer.config.trainer.get("sperated_train_logp", False):
+                            await self.pipeline.push("param_update", "logp", global_steps)
+                            enhanced_print("param_update", None, f"Sent completion signal to logp for step {global_steps} (after send complete)")
+                
+                    # Wait for recv phase completion (for generate)
+                    recv_success = await recv_task
+                    if recv_success:
+                        enhanced_print("param_update", None, f"Background param update recv phase completed for step {global_steps}")
+                        
+                        # Send signal to generate (needs recv completion)
+                        await self.pipeline.push("param_update", "generate", global_steps)
+                        enhanced_print("param_update", None, f"Sent completion signal to generate for step {global_steps} (after recv complete)")
             else:
                 # Handle single task for sync updates
                 success = await param_update_task

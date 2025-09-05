@@ -877,6 +877,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
     @GPUMemoryLogger(role="async_param_update", logger=logger)
     def async_param_update(self):
+        print(f"call async_param_update, is_rollout:{self._is_rollout}, is_actor:{self._is_actor}, {self.param_update_manager.async_param_update}")
         if not hasattr(self.param_update_manager, "async_param_update"):
             return
         assert self._is_rollout or self._is_actor
@@ -893,11 +894,10 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if hasattr(self.param_update_manager, "wait_for_send_complete"):
             self.param_update_manager.wait_for_send_complete()
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
     @GPUMemoryLogger(role="wait_for_recv_complete", logger=logger)
     def wait_for_recv_complete(self):
-        if hasattr(self.param_update_manager, "wait_for_recv_complete"):
-            self.param_update_manager.wait_for_recv_complete()
+        self.param_update_manager.wait_for_recv_complete()
 
     @register(dispatch_mode=Dispatch.ALL_TO_ONE, execute_mode=Execute.ALL)
     @GPUMemoryLogger(role="get_params_meta", logger=logger)

@@ -1,5 +1,6 @@
 import asyncio
 import time
+import gc
 import os
 import torch
 import ray
@@ -277,9 +278,15 @@ class ParamUpdateManager:
                 bucket_name = f"bucket_{i}"
                 self._param_groups[bucket_name] = group
         
+        if self.is_train_node():
+            # Create generator once and iterate through it efficiently
+            per_tensor_param = self.get_params_iter(self.target_device, use_bucketed=False)
+        else:
+            per_tensor_param = None
+
         # Process each bucket
         for bucket_name, group in self._param_groups.items():
-            enhanced_print("param_update", None, f"Processing {bucket_name} ({len(group)} tensors)")
+            enhanced_print("param_update", None, f"Processing {bucket_name}/{len(self._param_groups.items())} ({len(group)} tensors)")
             
             # if self.is_train_master_node():
             #     # Train master: gather all params and broadcast to all nodes
@@ -292,17 +299,17 @@ class ParamUpdateManager:
             #     success = self._sync_send_bucket(group, bucket_name)
             
             # All ranks participate in broadcast
-            success = self._sync_broadcast_bucket(group, bucket_name, func_call)
+            success = self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call)
             if not success:
                 enhanced_print("param_update", None, f"Failed {bucket_name}")
                 self._param_update_completed = True  # Set to completed on failure
                 return False
             enhanced_print("param_update", None, f"Completed {bucket_name}")
         
-        # Clear GPU cache after all buckets are processed
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            enhanced_print("param_update", None, "Cleared GPU cache after parameter update")
+        # # Clear GPU cache after all buckets are processed
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
+        #     enhanced_print("param_update", None, "Cleared GPU cache after parameter update")
         
         end_time = time.time()
         enhanced_print("param_update", None, f"GPU sync parameter update completed in {end_time - start_time:.2f} seconds")
@@ -311,22 +318,24 @@ class ParamUpdateManager:
         self._param_update_completed = True
         return True
     
-    def _sync_broadcast_bucket(self, group, bucket_name, func_call):
+    def _sync_broadcast_bucket(self, per_tensor_param, group, bucket_name, func_call, clear_cache=False):
         """All ranks participate in broadcast - optimized with tensor concatenation"""
         from ray.util.collective import broadcast
         
+        def local_clear_cache():
+            if not clear_cache:
+                return 
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Wait for all operations to complete
+
         if self.is_train_node():
             # All train nodes: collect and concatenate tensors
             tensors = []
             tensor_names = []
             tensor_shapes = []
             tensor_dtypes = []
-            
-            # Create generator once and iterate through it efficiently
-            per_tensor_param = self.get_params_iter(self.target_device, use_bucketed=False)
-            if per_tensor_param is None:
-                enhanced_print("param_update", None, f"Error: per_tensor_param returned None for {bucket_name}")
-                return False
             
             # Create a set of names we need for this bucket
             needed_names = {meta["name"] for meta in group}
@@ -341,6 +350,8 @@ class ParamUpdateManager:
                     tensor_names.append(param_name)
                     tensor_shapes.append(tensor.shape)
                     tensor_dtypes.append(tensor.dtype)
+                if len(needed_names) == len(tensor_names):
+                    break
             
             # Check if we found all needed tensors
             found_names = set(tensor_names)
@@ -361,9 +372,7 @@ class ParamUpdateManager:
                 concatenated_tensor = torch.cat(converted_tensors, dim=0)
             
             # Broadcast the concatenated tensor
-            enhanced_print("param_update", None, f"Starting broadcast for {bucket_name} with tensor size {concatenated_tensor.numel()}")
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
-            enhanced_print("param_update", None, f"Completed broadcast for {bucket_name}")
             
             if self.verbose_logging:
                 enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
@@ -375,11 +384,7 @@ class ParamUpdateManager:
             del tensors
             
             # Force garbage collection and clear cache
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Wait for all operations to complete
+            local_clear_cache()
         else:
             # Generation nodes: receive concatenated tensor
             # Calculate total size needed for concatenated tensor
@@ -399,9 +404,7 @@ class ParamUpdateManager:
                 enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using float32")
                 concatenated_tensor = torch.zeros(total_size, dtype=torch.float32, device="cuda")
             
-            enhanced_print("param_update", None, f"Starting receive broadcast for {bucket_name} with expected size {total_size}")
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
-            enhanced_print("param_update", None, f"Completed receive broadcast for {bucket_name}, received tensor size {concatenated_tensor.numel()}")
             
             # Split the concatenated tensor back into individual tensors
             received_tensors = []
@@ -432,12 +435,12 @@ class ParamUpdateManager:
             del concatenated_tensor
             
             # Force garbage collection but don't clear cache during NCCL communication
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Wait for all operations to complete
+            local_clear_cache()
         
+        # barrier to ensure all nodes complete broadcast
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            enhanced_print("param_update", None, "All nodes completed broadcast")
         return True
 
     
@@ -1085,11 +1088,11 @@ class ParamUpdateManager:
             while not self._param_update_completed:
                 time.sleep(0.1)  # Small sleep to avoid busy waiting
             enhanced_print("param_update", None, "NCCL sync mode: parameter update completed")
-            return
-        
-        # CPU async mode: wait for async recv thread
-        if hasattr(self, '_async_recv_thread') and self._async_recv_thread.is_alive():
-            self._async_recv_thread.join()
+            return 
+        else:
+            # CPU async mode: wait for async recv thread
+            if hasattr(self, '_async_recv_thread') and self._async_recv_thread.is_alive():
+                self._async_recv_thread.join()
 
         # Add distributed barrier to ensure all nodes complete recv before proceeding
         if torch.distributed.is_initialized():

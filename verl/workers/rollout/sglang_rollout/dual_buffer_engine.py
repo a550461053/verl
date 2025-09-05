@@ -329,9 +329,6 @@ class _BufferManager:
             enhanced_print('BufferManager', None, f'Cleared buffer {buf_idx} data (kept buffer state intact)')
 
 
-
-
-        
     def get_stats(self) -> dict:
         """Get BufferManager statistics"""
         return {
@@ -416,84 +413,7 @@ class DualBufferAsyncEngine:
                 self._bufman = _BufferManager(self, bucket_size_mb, memory_efficient_mode)
 
             
-            def execute_update_weights_before_generate(self, update_weights_func_call):
-                """Execute weight update before generation"""
-                if not self.enable_param_async:
-                    # NCCL GPU sync mode: no buffer switching needed
-                    enhanced_print("DualBufferAsyncEngine", None, "NCCL GPU sync mode: weights already loaded directly")
-                    return True
-                else:
-                    # CPU async mode: use original buffer switching logic
-                    if self._bufman is None:
-                        enhanced_print("DualBufferAsyncEngine", None, "ERROR: _bufman is None in CPU async mode")
-                        return False
-                    return self._execute_buffer_switch(update_weights_func_call)
-            
-            def set_version(self, version):
-                """Set current version - compatible with both modes"""
-                self._current_version = version
-                if version > self._latest_version:
-                    self._latest_version = version
-            
-            def get_version(self):
-                """Get current version - compatible with both modes"""
-                return self._current_version
-            
-            def clear_buffer_data(self, buffer_idx):
-                """Clear buffer data - compatible with both modes"""
-                if not self.enable_param_async:
-                    # NCCL mode: no buffer to clear
-                    return
-                else:
-                    # CPU async mode: clear buffer data
-                    if hasattr(self, '_buffer_weights') and self._buffer_weights[buffer_idx] is not None:
-                        self._buffer_weights[buffer_idx] = None
-                    if hasattr(self, '_buffer_metas') and self._buffer_metas[buffer_idx] is not None:
-                        self._buffer_metas[buffer_idx] = None
-                    if hasattr(self, '_buffer_versions') and self._buffer_versions[buffer_idx] is not None:
-                        self._buffer_versions[buffer_idx] = None
-                    if hasattr(self, '_buffer_ready'):
-                        self._buffer_ready[buffer_idx] = False
-        
-        def update_weights_from_tensor_sync(self, named_tensors, update_weights_func_call, load_format=None, flush_cache=True, target_buffer=None, version=None):
-            """Synchronized version of dual-buffer weight update - thread-safe, support cross-thread call"""
-            with self._update_lock:
-                # Determine target buffer
-                if target_buffer is None:
-                    if self._memory_efficient_mode:
-                        # Single buffer mode: always use buffer 0
-                        target_buffer = 0
-                    else:
-                        # Dual buffer mode: default update non-active buffer
-                        target_buffer = 1 - self._active_buffer
-                
-                # Determine version number
-                if version is None:
-                    version = self._latest_version + 1
-                    self._latest_version = version
-                
-                enhanced_print("DualBufferAsyncEngine", None, f"Updating buffer {target_buffer} (active: {self._active_buffer}) for version {version}")
-                
-                # Update weights and version of specified buffer
-                self._buffer_weights[target_buffer] = named_tensors.copy()
-                self._buffer_ready[target_buffer] = True
-                self._buffer_versions[target_buffer] = version
-                
-                enhanced_print("DualBufferAsyncEngine", None, f"Buffer {target_buffer} updated successfully for version {version}")
-                
-                # Directly call AsyncEngine's update_weights_from_tensor to actually update engine weights
-                success = self._apply_weights_to_engine_sync(named_tensors, update_weights_func_call)
-                
-                if success:
-                    # Switch to new updated buffer
-                    self._active_buffer = target_buffer
-                    self._current_version = version
-                    self._bufman.clear_buffer_data(target_buffer)  # Clear old buffer data to free memory # Clear buffer reference
-                    enhanced_print("DualBufferAsyncEngine", None, f"Switched to buffer {target_buffer} for version {version}")
-                else:
-                    enhanced_print("DualBufferAsyncEngine", None, f"ERROR: Failed to apply weights to engine for version {version}")
-                
-                return success
+
         
         def _register_and_update_buffer(self, target_buffer, named_tensors: Dict[str, torch.Tensor]):
             """Register and update buffer. Note: named_tensors may be Dict[str, Tensor] or Iterable[(name, Tensor)]"""
@@ -632,23 +552,51 @@ class DualBufferAsyncEngine:
         def _run_async_in_sync_context(self, coro):
             """Wrapper function to run async coroutine in sync context"""
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If event loop is running, create new event loop
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    result = new_loop.run_until_complete(coro)
-                    new_loop.close()
-                else:
-                    # If event loop is not running, use directly
-                    result = loop.run_until_complete(coro)
-            except RuntimeError as ex:
-                # If no event loop, create new
+                # Try to get current event loop
+                try:
+                    loop = asyncio.get_running_loop()
+                    # If we're in a running loop, we need to use a different approach
+                    import concurrent.futures
+                    import threading
+                    
+                    # Create a new thread with its own event loop
+                    result = None
+                    exception = None
+                    
+                    def run_in_thread():
+                        nonlocal result, exception
+                        try:
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            result = new_loop.run_until_complete(coro)
+                            new_loop.close()
+                        except Exception as e:
+                            exception = e
+                    
+                    thread = threading.Thread(target=run_in_thread)
+                    thread.start()
+                    thread.join()
+                    
+                    if exception:
+                        raise exception
+                    return result
+                    
+                except RuntimeError:
+                    # No running loop, we can use the current loop
+                    loop = asyncio.get_event_loop()
+                    return loop.run_until_complete(coro)
+                    
+            except Exception as e:
+                enhanced_print("DualBufferAsyncEngine", None, f"Error in _run_async_in_sync_context: {e}")
+                # Fallback: create a completely new event loop
                 new_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(new_loop)
-                result = new_loop.run_until_complete(coro)
-                new_loop.close()
-            return result
+                try:
+                    result = new_loop.run_until_complete(coro)
+                    return result
+                finally:
+                    new_loop.close()
+
 
         def _apply_weights_to_engine_sync(self, weights, update_weights_func_call):
             """Synchronized version: apply weights to engine - directly call AsyncEngine's update_weights_from_tensor"""
@@ -658,16 +606,10 @@ class DualBufferAsyncEngine:
                 t1 = time.time()
                 
                 if not self.enable_param_async:
-                    named_tensors = weights
-                    """Apply weights directly to engine - used in NCCL GPU sync mode"""
-                    # Convert to list format if needed
-                    if isinstance(named_tensors, dict):
-                        tensor_list = list(named_tensors.items())
-                    else:
-                        tensor_list = list(named_tensors)
-                    
-                    # Apply weights directly
-                    result = update_weights_func_call(tensor_list)
+                    # NCCL GPU sync mode: no buffer management, use default use_reqinput
+                    result = self._run_async_in_sync_context(
+                        update_weights_func_call(weights, use_reqinput=False)
+                    )
                 else:
                     # CPU async mode: use buffer management settings
                     result = self._run_async_in_sync_context(
@@ -688,7 +630,8 @@ class DualBufferAsyncEngine:
             except Exception as e:
                 enhanced_print("DualBufferAsyncEngine", None, f"Error in _apply_weights_to_engine_sync: {e}")
                 return False
-        
+    
+
         def get_current_version(self):
             """Get current active version number"""
             with self._update_lock:
@@ -708,37 +651,83 @@ class DualBufferAsyncEngine:
                 if self._current_version is None or self._current_version < 0:
                     self._current_version = 0
                 return True
-        
+
+        def update_weights_from_tensor_sync(self, named_tensors, update_weights_func_call, load_format=None, flush_cache=True, target_buffer=None, version=None):
+            """Synchronized version of dual-buffer weight update - thread-safe, support cross-thread call"""
+            with self._update_lock:
+                # Determine target buffer
+                if target_buffer is None:
+                    if self._memory_efficient_mode:
+                        # Single buffer mode: always use buffer 0
+                        target_buffer = 0
+                    else:
+                        # Dual buffer mode: default update non-active buffer
+                        target_buffer = 1 - self._active_buffer
+                
+                # Determine version number
+                if version is None:
+                    version = self._latest_version + 1
+                    self._latest_version = version
+                
+                enhanced_print("DualBufferAsyncEngine", None, f"Updating buffer {target_buffer} (active: {self._active_buffer}) for version {version}")
+                
+                # Update weights and version of specified buffer
+                self._buffer_weights[target_buffer] = named_tensors.copy()
+                self._buffer_ready[target_buffer] = True
+                self._buffer_versions[target_buffer] = version
+                
+                enhanced_print("DualBufferAsyncEngine", None, f"Buffer {target_buffer} updated successfully for version {version}")
+                
+                # Directly call AsyncEngine's update_weights_from_tensor to actually update engine weights
+                success = self._apply_weights_to_engine_sync(named_tensors, update_weights_func_call)
+                
+                if success:
+                    # Switch to new updated buffer
+                    self._active_buffer = target_buffer
+                    self._current_version = version
+                    self._bufman.clear_buffer_data(target_buffer)  # Clear old buffer data to free memory # Clear buffer reference
+                    enhanced_print("DualBufferAsyncEngine", None, f"Switched to buffer {target_buffer} for version {version}")
+                else:
+                    enhanced_print("DualBufferAsyncEngine", None, f"ERROR: Failed to apply weights to engine for version {version}")
+                
+                return success
+            
         def execute_update_weights_before_generate(self, update_weights_func_call):
             """Execute weight update before generate - switch to latest version"""
-            with self._update_lock:
-                enhanced_print("DualBufferAsyncEngine", None, f"Current version: {self._current_version}, Latest version: {self._latest_version}")
-                
-                # Check if there is a new version available
-                if self._latest_version >= self._current_version:
-                    # Find buffer containing latest version
-                    target_buffer = None
-                    for buffer_id in range(2):
-                        if self._buffer_versions[buffer_id] == self._latest_version: # and self._buffer_ready[buffer_id]:
-                            target_buffer = buffer_id
-                            break
+            if not self.enable_param_async:
+                # NCCL GPU sync mode: no buffer switching needed
+                enhanced_print("DualBufferAsyncEngine", None, "NCCL GPU sync mode: weights already loaded directly")
+                return True
+            else:
+                # CPU async mode: use original buffer switching logic
+                with self._update_lock:
+                    enhanced_print("DualBufferAsyncEngine", None, f"Current version: {self._current_version}, Latest version: {self._latest_version}")
                     
-                    if target_buffer is not None:                        
-                        # Switch to new version
-                        success = self.switch_to_buffer_sync(target_buffer, update_weights_func_call)
-                        if success:
-                            self._current_version = self._latest_version
-                            enhanced_print("DualBufferAsyncEngine", None, f"Successfully switched to buffer {target_buffer} for version {self._latest_version}")
-                            return True
+                    # Check if there is a new version available
+                    if self._latest_version >= self._current_version:
+                        # Find buffer containing latest version
+                        target_buffer = None
+                        for buffer_id in range(2):
+                            if self._buffer_versions[buffer_id] == self._latest_version: # and self._buffer_ready[buffer_id]:
+                                target_buffer = buffer_id
+                                break
+                        
+                        if target_buffer is not None:                        
+                            # Switch to new version
+                            success = self.switch_to_buffer_sync(target_buffer, update_weights_func_call)
+                            if success:
+                                self._current_version = self._latest_version
+                                enhanced_print("DualBufferAsyncEngine", None, f"Successfully switched to buffer {target_buffer} for version {self._latest_version}")
+                                return True
+                            else:
+                                enhanced_print("DualBufferAsyncEngine", None, f"Failed to switch to version {self._latest_version}")
+                                return False
                         else:
-                            enhanced_print("DualBufferAsyncEngine", None, f"Failed to switch to version {self._latest_version}")
+                            enhanced_print("DualBufferAsyncEngine", None, f"Latest version {self._latest_version} not found in any ready buffer")
                             return False
                     else:
-                        enhanced_print("DualBufferAsyncEngine", None, f"Latest version {self._latest_version} not found in any ready buffer")
-                        return False
-                else:
-                    enhanced_print("DualBufferAsyncEngine", None, f"No new version available, current version: {self._current_version}")
-                    return True
+                        enhanced_print("DualBufferAsyncEngine", None, f"No new version available, current version: {self._current_version}")
+                        return True
         
         def switch_to_buffer_sync(self, buffer_id=-1, update_weights_func_call=None):
             """Synchronized version: switch to specified buffer - thread-safe"""
@@ -795,14 +784,21 @@ class DualBufferAsyncEngine:
                     enhanced_print("DualBufferAsyncEngine", None, f"Failed to apply weights from buffer {buffer_id} to engine; not switching")
                     return False
 
-        # Define methods outside the class first
         def update_buffer_data_only(self, named_tensors, version=None, group_tensor_count=None):
             """Update buffer data - simplified for NCCL GPU sync mode"""
             if not self.enable_param_async:
-                # NCCL GPU sync mode: directly load weights, no buffer management
-                return self._run_async_in_sync_context(
-                    self.sharding_manager.update_weights(named_tensors)
+                # NCCL GPU sync mode: use improved async wrapper
+                # Convert to list format if needed
+                if isinstance(named_tensors, dict):
+                    tensor_list = list(named_tensors.items())
+                else:
+                    tensor_list = list(named_tensors)
+                
+                # Use improved async wrapper
+                result = self._run_async_in_sync_context(
+                    self.sharding_manager.update_weights(tensor_list)
                 )
+                return result
             else:
                 # CPU async mode: use original buffer management
                 if self._bufman is None:
@@ -837,16 +833,17 @@ class DualBufferAsyncEngine:
                 "current_version": self._current_version,
                 "latest_version": self._latest_version,
                 "need_reload": self._need_reload,
-                "buffer_manager": self._bufman.get_stats()
+                "buffer_manager": self._bufman.get_stats() if self._bufman else None
             }
         
         def get_bucket_size_mb(self) -> int:
             """Get current bucket size setting"""
-            return self._bufman.get_bucket_size_mb()
+            return self._bufman.get_bucket_size_mb() if self._bufman else 0
         
         def set_bucket_size_mb(self, bucket_size_mb: int):
             """Set bucket size"""
-            self._bufman.set_bucket_size_mb(bucket_size_mb)
+            if self._bufman:
+                self._bufman.set_bucket_size_mb(bucket_size_mb)
         
         DualBufferAsyncEngineImpl.get_stats = get_stats
         DualBufferAsyncEngineImpl.get_bucket_size_mb = get_bucket_size_mb
