@@ -255,10 +255,18 @@ class ParamUpdateManager:
         # Get groups info - different logic for train vs generation nodes
         if self.is_train_node():
             # Train nodes: generate params_meta from model_params
-            if not self._params_meta:
-                self.get_params_meta()
+            # Force refresh to ensure dtype accuracy
+            self.get_params_meta(force_refresh=True)
+            
+            # Sync updated meta-info to generation nodes
+            enhanced_print("param_update", None, "Syncing updated meta-info to generation nodes")
+            self._sync_meta_info_to_generation_nodes()
         else:
-            # Generation nodes: use preset params_meta or get from train nodes
+            # Generation nodes: try to get updated meta-info from train nodes
+            # This ensures dtype consistency across all nodes
+            enhanced_print("param_update", None, "Generation node: checking for updated meta-info")
+            self._try_get_updated_meta_info()
+            
             if not self._params_meta:
                 enhanced_print("param_update", None, "Generation node: no params_meta available")
                 self._param_update_completed = True  # Set to completed on failure
@@ -366,10 +374,31 @@ class ParamUpdateManager:
                 # All tensors have the same dtype, can concatenate directly
                 concatenated_tensor = torch.cat(tensors, dim=0)
             else:
-                # Different dtypes, need to convert to a common dtype (e.g., float32)
-                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, converting to float32")
-                converted_tensors = [t.float() for t in tensors]
+                # Different dtypes detected - this should not happen in normal training
+                # Keep original dtypes and let SGLang handle the reconstruction
+                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, keeping original dtypes")
+                
+                # Use the first tensor's dtype as the common dtype for concatenation
+                # This preserves the original precision and lets SGLang handle reconstruction
+                first_dtype = tensors[0].dtype
+                enhanced_print("param_update", None, f"Using {first_dtype} as common dtype for concatenation")
+                
+                # Convert all tensors to the first tensor's dtype for concatenation
+                converted_tensors = []
+                for i, t in enumerate(tensors):
+                    if t.dtype != first_dtype:
+                        # Convert to first tensor's dtype
+                        converted_t = t.to(first_dtype)
+                        converted_tensors.append(converted_t)
+                        # Clear original tensor to free memory
+                        del t
+                    else:
+                        converted_tensors.append(t)
+                
                 concatenated_tensor = torch.cat(converted_tensors, dim=0)
+                
+                # Clear converted tensors to free memory
+                del converted_tensors
             
             # Broadcast the concatenated tensor
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
@@ -378,10 +407,10 @@ class ParamUpdateManager:
                 enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
             
             # Clear memory after broadcast
-            for tensor in tensors:
-                del tensor
-            del concatenated_tensor
-            del tensors
+            # for tensor in tensors:
+            #     del tensor
+            # del concatenated_tensor
+            # del tensors
             
             # Force garbage collection and clear cache
             local_clear_cache()
@@ -400,9 +429,10 @@ class ParamUpdateManager:
                 first_dtype = group[0]["dtype"]
                 concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
             else:
-                # Mixed dtypes, use float32 as common dtype
-                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using float32")
-                concatenated_tensor = torch.zeros(total_size, dtype=torch.float32, device="cuda")
+                # Mixed dtypes, use first tensor's dtype as common dtype
+                first_dtype = group[0]["dtype"]
+                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using {first_dtype}")
+                concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
             
             broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
             
@@ -429,18 +459,23 @@ class ParamUpdateManager:
             enhanced_print("param_update", None, f"Loaded weights for {bucket_name}")
             
             # More aggressive memory cleanup
-            for name, tensor in received_tensors:
-                del tensor
-            del received_tensors
-            del concatenated_tensor
+            # for name, tensor in received_tensors:
+            #     del tensor
+            # del received_tensors
+            # del concatenated_tensor
             
             # Force garbage collection but don't clear cache during NCCL communication
             local_clear_cache()
         
+        # barrier ray col
+        from ray.util.collective import barrier
+        barrier(group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+
         # barrier to ensure all nodes complete broadcast
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
             enhanced_print("param_update", None, "All nodes completed broadcast")
+
         return True
 
     
@@ -532,8 +567,8 @@ class ParamUpdateManager:
         enhanced_print("param_update", None, "Starting CPU async parameter update")
         
         # First get groups info, ensure send and recv use same grouping
-        if not self._params_meta:
-            self.get_params_meta()
+        # Force refresh to ensure dtype accuracy
+        self.get_params_meta(force_refresh=True)
         
         # If no func_call provided, use default update_buffer_data_only method
         if func_call is None:
@@ -669,10 +704,10 @@ class ParamUpdateManager:
             return cache_info
         return {}
 
-    def get_params_meta(self):
+    def get_params_meta(self, force_refresh=False):
         """Get parameter metadata"""
-        # Check if _params_meta is initialized and not empty
-        if hasattr(self, '_params_meta') and self._params_meta and len(self._params_meta) > 0:
+        # Check if _params_meta is initialized and not empty, and not forcing refresh
+        if not force_refresh and hasattr(self, '_params_meta') and self._params_meta and len(self._params_meta) > 0:
             return self._params_meta
         
         # Check if model_params is available
@@ -686,9 +721,8 @@ class ParamUpdateManager:
             enhanced_print("param_update", None, "Error: per_tensor_param returned None")
             return []
         
-        # Ensure _params_meta is initialized
-        if not hasattr(self, '_params_meta') or self._params_meta is None:
-            self._params_meta = []
+        # Always regenerate meta-info to ensure dtype accuracy
+        self._params_meta = []
     
         for key, tensor in per_tensor_param:
             if tensor is not None:
@@ -715,6 +749,35 @@ class ParamUpdateManager:
     def set_params_meta(self, params_meta):
         """Set the parameters metadata."""
         self._params_meta = params_meta
+    
+    def _sync_meta_info_to_generation_nodes(self):
+        """Sync updated meta-info to generation nodes"""
+        if hasattr(self, 'ray_col_name') and self.ray_col_name:
+            from verl.workers.param_update.ray_async_communication import cross_process_ray_put
+            
+            # Put the updated meta-info to Ray object store
+            meta_info_ref = cross_process_ray_put(self._params_meta)
+            
+            # Store the reference for generation nodes to use
+            self._meta_info_ref = meta_info_ref
+            
+            enhanced_print("param_update", None, f"Synced meta-info to Ray object store: {len(self._params_meta)} entries")
+    
+    def _try_get_updated_meta_info(self):
+        """Try to get updated meta-info from train nodes"""
+        if hasattr(self, 'ray_col_name') and self.ray_col_name:
+            from verl.workers.param_update.ray_async_communication import cross_process_ray_get
+            
+            # Check if there's a meta_info_ref available from train nodes
+            if hasattr(self, '_meta_info_ref') and self._meta_info_ref is not None:
+                updated_meta_info = cross_process_ray_get(self._meta_info_ref)
+                if updated_meta_info is not None:
+                    self._params_meta = updated_meta_info
+                    enhanced_print("param_update", None, f"Updated meta-info from Ray object store: {len(self._params_meta)} entries")
+                else:
+                    enhanced_print("param_update", None, "No updated meta-info available, using existing meta-info")
+            else:
+                enhanced_print("param_update", None, "No meta_info_ref available, using existing meta-info")
 
     def preduce_per_tensor_generator(self, convert_generator_to_list=True):
         """Asynchronously get the current parameters."""

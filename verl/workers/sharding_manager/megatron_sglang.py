@@ -28,6 +28,7 @@ try:
     from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 except Exception:
     sgl_update_weights = None
+from verl.trainer.ppo.pipeline.pipeline_utils import enhanced_print
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -268,6 +269,9 @@ class MegatronSGLangAsyncShardingManager(MegatronSGLangShardingManager):
         self.model_config = model_config
         self.transformer_config = transformer_config
         self.layer_name_mapping = layer_name_mapping
+        # Initialize offload_param and bridge from parent class
+        self.offload_param = offload_param
+        self.bridge = bridge
         self.weight_converter = weight_converter
         self.device_mesh = device_mesh
 
@@ -327,70 +331,52 @@ class MegatronSGLangAsyncShardingManager(MegatronSGLangShardingManager):
 
     def update_weights_sync(self, params):
         """
-        Fully synchronous version of update_weights, avoid using async calls
+        Synchronous version of update_weights
+        Uses the original simple approach that works for first step
         """
         named_tensors = params
         load_format = None
         
-        for tensor_index, (name, tensor) in enumerate(named_tensors):
-            if self.device_mesh["tp"].get_local_rank() == 0:
-                if hasattr(self.inference_engine, 'update_weights_from_tensor_sync'):
-                    self.inference_engine.update_weights_from_tensor_sync(
-                        named_tensors=[
-                            (
-                                name,
-                                tensor.detach(),
-                            )
-                        ],
-                        load_format=load_format,
-                        flush_cache=False,
+        # For NCCL sync mode, we need to process parameters bucket by bucket
+        # to prevent GPU OOM: NCCL sync -> sglang-load (sgl_update_weights)
+        if sgl_update_weights is not None:
+            update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
+            
+            enhanced_print("MegatronSGLangAsyncShardingManager", None, 
+                         f"Processing {len(named_tensors)} tensors in buckets of {update_weights_bucket_bytes} bytes")
+            
+            # Use the simple approach that works for first step
+            loop = asyncio.get_event_loop()
+            
+            enhanced_print("MegatronSGLangAsyncShardingManager", None, 
+                         "Starting weight update process")
+            
+            # Process each bucket immediately to avoid GPU OOM
+            for bucket_idx, params_batch in enumerate(get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes)):
+                enhanced_print("MegatronSGLangAsyncShardingManager", None, 
+                             f"Processing bucket {bucket_idx + 1} with {len(params_batch)} tensors")
+                # Use run_until_complete without timeout - ensure all operations complete
+                loop.run_until_complete(
+                    sgl_update_weights(
+                        engine=self.inference_engine,
+                        params_batch=params_batch,
+                        device_mesh_key="tp",
+                        device_mesh=self.device_mesh,
                     )
-                else:
-                    print(f"Warning: inference_engine has no update_weights_from_tensor_sync method")
-
+                )
+                enhanced_print("MegatronSGLangAsyncShardingManager", None, 
+                                f"Successfully processed bucket {bucket_idx + 1}")
+                
+                # Clear the processed bucket from memory immediately
+                # del params_batch
+            
+            # Final flush_cache after all buckets are processed
             if self.device_mesh["tp"].get_local_rank() == 0:
-                if hasattr(self.inference_engine, 'flush_cache_sync'):
-                    self.inference_engine.flush_cache_sync()
-                else:
-                    print(f"Warning: inference_engine has no flush_cache_sync method")
-
-    async def update_weights(self, params, use_reqinput=False):
-        # if self.device_mesh["tp"].get_local_rank() == 0:
-        #     await self.inference_engine.resume_memory_occupation()
-
-        if use_reqinput:
-            for obj in params:
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.update_weights_from_reqinput(obj)
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.flush_cache()
-            # del params
-        else:
-            # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
-            # named_tensors = [(k, v) for k, v in params.items()]
-            named_tensors = params
-            load_format = None
-
-            for tensor_index, (name, tensor) in enumerate(named_tensors):
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.update_weights_from_tensor_legacy(
-                        named_tensors=[
-                            (
-                                name,
-                                tensor.detach(),
-                            )
-                        ],
-                        load_format=load_format,
-                        flush_cache=False,
-                    )
-
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.flush_cache()
-        return True
-
-    async def release_memory(self):
-        if self.device_mesh["tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
-            await self.inference_engine.release_memory_occupation()
+                loop.run_until_complete(self.inference_engine.flush_cache())
+                
+            enhanced_print("MegatronSGLangAsyncShardingManager", None, 
+                         "Successfully processed all weight update buckets")
+    
 
 
     @GPUMemoryLogger(role="MegatronSGLangAsyncShardingManager enter", logger=logger)

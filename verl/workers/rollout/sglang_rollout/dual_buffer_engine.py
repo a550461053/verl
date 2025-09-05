@@ -552,50 +552,40 @@ class DualBufferAsyncEngine:
         def _run_async_in_sync_context(self, coro):
             """Wrapper function to run async coroutine in sync context"""
             try:
-                # Try to get current event loop
-                try:
-                    loop = asyncio.get_running_loop()
-                    # If we're in a running loop, we need to use a different approach
-                    import concurrent.futures
+                # Use asyncio.run() which creates a new event loop
+                return asyncio.run(coro)
+            except RuntimeError as e:
+                if "cannot be called from a running event loop" in str(e):
+                    # Fallback to thread-based approach
                     import threading
-                    
-                    # Create a new thread with its own event loop
                     result = None
                     exception = None
                     
                     def run_in_thread():
                         nonlocal result, exception
                         try:
-                            new_loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(new_loop)
-                            result = new_loop.run_until_complete(coro)
-                            new_loop.close()
+                            result = asyncio.run(coro)
                         except Exception as e:
                             exception = e
                     
-                    thread = threading.Thread(target=run_in_thread)
+                    thread = threading.Thread(target=run_in_thread, daemon=True)
                     thread.start()
-                    thread.join()
+                    thread.join(timeout=300)
+                    
+                    if thread.is_alive():
+                        enhanced_print("DualBufferAsyncEngine", None, "Warning: _run_async_in_sync_context timed out")
+                        return False
                     
                     if exception:
                         raise exception
                     return result
-                    
-                except RuntimeError:
-                    # No running loop, we can use the current loop
-                    loop = asyncio.get_event_loop()
-                    return loop.run_until_complete(coro)
-                    
+                else:
+                    raise
             except Exception as e:
                 enhanced_print("DualBufferAsyncEngine", None, f"Error in _run_async_in_sync_context: {e}")
-                # Fallback: create a completely new event loop
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    result = new_loop.run_until_complete(coro)
-                    return result
-                finally:
-                    new_loop.close()
+                import traceback
+                traceback.print_exc()
+                return False
 
 
         def _apply_weights_to_engine_sync(self, weights, update_weights_func_call):
@@ -677,10 +667,15 @@ class DualBufferAsyncEngine:
                 self._buffer_versions[target_buffer] = version
                 
                 enhanced_print("DualBufferAsyncEngine", None, f"Buffer {target_buffer} updated successfully for version {version}")
+                # In NCCL sync mode, we don't need to call _apply_weights_to_engine_sync
+                # because weights are already updated through sharding_manager
+                if update_weights_func_call is not None:
+                    # Only call _apply_weights_to_engine_sync if update_weights_func_call is provided
+                    success = self._apply_weights_to_engine_sync(named_tensors, update_weights_func_call)
+                else:
+                    # NCCL sync mode: weights already updated, just mark as success
                 
-                # Directly call AsyncEngine's update_weights_from_tensor to actually update engine weights
-                success = self._apply_weights_to_engine_sync(named_tensors, update_weights_func_call)
-                
+                    success = True
                 if success:
                     # Switch to new updated buffer
                     self._active_buffer = target_buffer
@@ -787,25 +782,34 @@ class DualBufferAsyncEngine:
         def update_buffer_data_only(self, named_tensors, version=None, group_tensor_count=None):
             """Update buffer data - simplified for NCCL GPU sync mode"""
             if not self.enable_param_async:
-                # NCCL GPU sync mode: use improved async wrapper
-                # Convert to list format if needed
-                if isinstance(named_tensors, dict):
-                    tensor_list = list(named_tensors.items())
-                else:
-                    tensor_list = list(named_tensors)
-                
-                # Use improved async wrapper
-                result = self._run_async_in_sync_context(
-                    self.sharding_manager.update_weights(tensor_list)
-                )
-                return result
+                # NCCL GPU sync mode: use synchronous update_weights
+                try:
+                    # Convert to list format if needed
+                    if isinstance(named_tensors, dict):
+                        tensor_list = list(named_tensors.items())
+                    else:
+                        tensor_list = list(named_tensors)
+                    
+                    # Use synchronous update_weights if available, otherwise fallback to async with sync wrapper
+                    if hasattr(self.sharding_manager, 'update_weights_sync'):
+                        result = self.sharding_manager.update_weights_sync(tensor_list)
+                        enhanced_print("DualBufferAsyncEngine", None, f"Used sync update_weights for {len(tensor_list)} tensors")
+                        return result
+                    else:
+                        # Fallback to async method with sync wrapper
+                        result = self._run_async_in_sync_context(
+                            self.sharding_manager.update_weights(tensor_list)
+                        )
+                        return result
+                except Exception as e:
+                    enhanced_print("DualBufferAsyncEngine", None, f"Error in NCCL sync update_weights: {e}")
+                    return False
             else:
                 # CPU async mode: use original buffer management
                 if self._bufman is None:
                     enhanced_print("DualBufferAsyncEngine", None, "ERROR: _bufman is None in CPU async mode")
                     return False
                 return self._bufman.register_update(named_tensors, version, group_tensor_count)
-        
         # Add methods to dynamically created class
         DualBufferAsyncEngineImpl.update_weights_from_tensor_sync = update_weights_from_tensor_sync
         DualBufferAsyncEngineImpl.update_buffer_data_only = update_buffer_data_only
