@@ -255,27 +255,15 @@ class ParamUpdateManager:
         # Get groups info - different logic for train vs generation nodes
         if self.is_train_node():
             # Train nodes: generate params_meta from model_params
-            # Force refresh to ensure dtype accuracy
             self.get_params_meta(force_refresh=True)
-            
-            # Sync updated meta-info to generation nodes
-            enhanced_print("param_update", None, "Syncing updated meta-info to generation nodes")
-            self._sync_meta_info_to_generation_nodes()
+            self._sync_meta_info_to_all_nodes()
         else:
-            # Generation nodes: try to get updated meta-info from train nodes
-            # This ensures dtype consistency across all nodes
-            enhanced_print("param_update", None, "Generation node: checking for updated meta-info")
-            self._try_get_updated_meta_info()
+            self._sync_meta_info_to_all_nodes()
             
             if not self._params_meta:
                 enhanced_print("param_update", None, "Generation node: no params_meta available")
                 self._param_update_completed = True  # Set to completed on failure
                 return False
-        
-        if not self._params_meta:
-            enhanced_print("param_update", None, "No parameter metadata available")
-            self._param_update_completed = True  # Set to completed on failure
-            return False
         
         # Get parameter groups for bucket processing
         if not self._param_groups:
@@ -295,30 +283,10 @@ class ParamUpdateManager:
         # Process each bucket
         for bucket_name, group in self._param_groups.items():
             enhanced_print("param_update", None, f"Processing {bucket_name}/{len(self._param_groups.items())} ({len(group)} tensors)")
-            
-            # if self.is_train_master_node():
-            #     # Train master: gather all params and broadcast to all nodes
-            #     success = self._sync_send_bucket(group, bucket_name)
-            # elif self.is_generation_node():
-            #     # Generation node: receive params and load weights
-            #     success = self._sync_recv_bucket(group, bucket_name, func_call)
-            # else:
-            #     # Other train nodes: skip
-            #     success = self._sync_send_bucket(group, bucket_name)
-            
+
             # All ranks participate in broadcast
-            success = self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call)
-            if not success:
-                enhanced_print("param_update", None, f"Failed {bucket_name}")
-                self._param_update_completed = True  # Set to completed on failure
-                return False
-            enhanced_print("param_update", None, f"Completed {bucket_name}")
-        
-        # # Clear GPU cache after all buckets are processed
-        # if torch.cuda.is_available():
-        #     torch.cuda.empty_cache()
-        #     enhanced_print("param_update", None, "Cleared GPU cache after parameter update")
-        
+            self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call)
+
         end_time = time.time()
         enhanced_print("param_update", None, f"GPU sync parameter update completed in {end_time - start_time:.2f} seconds")
         
@@ -406,17 +374,17 @@ class ParamUpdateManager:
             if self.verbose_logging:
                 enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
             
+            received_tensors = []
             # Clear memory after broadcast
-            # for tensor in tensors:
-            #     del tensor
-            # del concatenated_tensor
-            # del tensors
+            for tensor in tensors:
+                del tensor
+            del concatenated_tensor
+            del tensors
             
             # Force garbage collection and clear cache
             local_clear_cache()
         else:
             # Generation nodes: receive concatenated tensor
-            # Calculate total size needed for concatenated tensor
             total_size = 0
             for meta in group:
                 shape = meta["shape"]
@@ -455,14 +423,14 @@ class ParamUpdateManager:
         
         # Load weights immediately to avoid memory accumulation (only for generation nodes)
         if self.is_generation_node() and func_call and received_tensors:
-            func_call(received_tensors, version=0, group_tensor_count=len(received_tensors))
+            func_call(received_tensors)
             enhanced_print("param_update", None, f"Loaded weights for {bucket_name}")
             
             # More aggressive memory cleanup
-            # for name, tensor in received_tensors:
-            #     del tensor
-            # del received_tensors
-            # del concatenated_tensor
+            for name, tensor in received_tensors:
+                del tensor
+            del received_tensors
+            del concatenated_tensor
             
             # Force garbage collection but don't clear cache during NCCL communication
             local_clear_cache()
@@ -470,14 +438,7 @@ class ParamUpdateManager:
         # barrier ray col
         from ray.util.collective import barrier
         barrier(group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
-
-        # barrier to ensure all nodes complete broadcast
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-            enhanced_print("param_update", None, "All nodes completed broadcast")
-
         return True
-
     
     def _sync_send_bucket(self, group, bucket_name):
         """Train master: gather all params and broadcast to all nodes"""
@@ -744,40 +705,84 @@ class ParamUpdateManager:
                 self._params_meta.append(meta)
 
         enhanced_print("param_update", None, f"Generated {len(self._params_meta)} parameter metadata entries using bucketed generator")
+        
+        # Mark that meta-info has been updated
+        self._meta_info_updated = True
+        
         return self._params_meta
 
     def set_params_meta(self, params_meta):
         """Set the parameters metadata."""
         self._params_meta = params_meta
     
-    def _sync_meta_info_to_generation_nodes(self):
-        """Sync updated meta-info to generation nodes"""
-        if hasattr(self, 'ray_col_name') and self.ray_col_name:
-            from verl.workers.param_update.ray_async_communication import cross_process_ray_put
-            
-            # Put the updated meta-info to Ray object store
-            meta_info_ref = cross_process_ray_put(self._params_meta)
-            
-            # Store the reference for generation nodes to use
-            self._meta_info_ref = meta_info_ref
-            
-            enhanced_print("param_update", None, f"Synced meta-info to Ray object store: {len(self._params_meta)} entries")
+    def is_meta_info_updated(self):
+        """Check if meta-info has been updated and needs sync"""
+        return getattr(self, '_meta_info_updated', False)
     
-    def _try_get_updated_meta_info(self):
-        """Try to get updated meta-info from train nodes"""
-        if hasattr(self, 'ray_col_name') and self.ray_col_name:
-            from verl.workers.param_update.ray_async_communication import cross_process_ray_get
+    def mark_meta_info_synced(self):
+        """Mark that meta-info has been synced"""
+        self._meta_info_updated = False
+    
+    def _sync_meta_info_to_all_nodes(self):
+        """Sync updated meta-info to all nodes using Ray communication"""
+        # All nodes participate in broadcast - train master sends, others receive
+        from ray.util.collective import broadcast
+        
+        if self.is_train_master_node():
+            # Train master node: prepare and send meta-info
+            meta_info_tensor = self._serialize_meta_info()
+            enhanced_print("param_update", None, f"Train master: preparing to broadcast meta-info: {len(self._params_meta)} entries")
+        else:
+            # All other nodes: prepare to receive meta-info
+            # First broadcast the size, then broadcast the actual data
+            size_tensor = torch.zeros(1, dtype=torch.int64, device="cuda")
+            broadcast(size_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
             
-            # Check if there's a meta_info_ref available from train nodes
-            if hasattr(self, '_meta_info_ref') and self._meta_info_ref is not None:
-                updated_meta_info = cross_process_ray_get(self._meta_info_ref)
-                if updated_meta_info is not None:
-                    self._params_meta = updated_meta_info
-                    enhanced_print("param_update", None, f"Updated meta-info from Ray object store: {len(self._params_meta)} entries")
-                else:
-                    enhanced_print("param_update", None, "No updated meta-info available, using existing meta-info")
-            else:
-                enhanced_print("param_update", None, "No meta_info_ref available, using existing meta-info")
+            # Create tensor with the received size
+            meta_info_tensor = torch.zeros(size_tensor.item(), dtype=torch.uint8, device="cuda")
+        
+        # All nodes participate in broadcast (collective operation)
+        broadcast(meta_info_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+        
+        if not self.is_train_master_node():
+            # Non-master nodes: deserialize received meta-info
+            self._params_meta = self._deserialize_meta_info(meta_info_tensor)
+            enhanced_print("param_update", None, f"Received meta-info from train master: {len(self._params_meta)} entries")
+        else:
+            # Train master: mark as synced
+            self._meta_info_updated = False
+            enhanced_print("param_update", None, f"Broadcasted meta-info to all nodes: {len(self._params_meta)} entries")
+    
+    
+    def _serialize_meta_info(self):
+        """Serialize meta-info to a tensor for broadcasting"""
+        import pickle
+        
+        # Serialize meta-info to bytes
+        meta_info_bytes = pickle.dumps(self._params_meta)
+        
+        # Convert to tensor
+        meta_info_tensor = torch.frombuffer(meta_info_bytes, dtype=torch.uint8)
+        
+        # First broadcast the size
+        size_tensor = torch.tensor([len(meta_info_tensor)], dtype=torch.int64, device="cuda")
+        from ray.util.collective import broadcast
+        broadcast(size_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+        
+        # Return the actual data tensor
+        return meta_info_tensor.cuda()
+    
+    def _deserialize_meta_info(self, meta_info_tensor):
+        """Deserialize meta-info from a tensor"""
+        import pickle
+        
+        # Convert tensor to bytes
+        meta_info_bytes = meta_info_tensor.cpu().numpy().tobytes()
+        
+        # Deserialize
+        meta_info = pickle.loads(meta_info_bytes)
+        
+        return meta_info
 
     def preduce_per_tensor_generator(self, convert_generator_to_list=True):
         """Asynchronously get the current parameters."""

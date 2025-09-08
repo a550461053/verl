@@ -877,7 +877,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
     @GPUMemoryLogger(role="async_param_update", logger=logger)
     def async_param_update(self):
-        print(f"call async_param_update, is_rollout:{self._is_rollout}, is_actor:{self._is_actor}, {self.param_update_manager.async_param_update}")
         if not hasattr(self.param_update_manager, "async_param_update"):
             return
         assert self._is_rollout or self._is_actor

@@ -638,6 +638,9 @@ class SGLangRollout(BaseRollout):
 
     def get_update_weight_func(self):
         update_func_call = self._engine.update_buffer_data_only if hasattr(self, '_engine') and self._engine is not None else None
+        if update_func_call is None and self.sharding_manager is not None:
+            # other ranks call sharding_manager to update weights
+            update_func_call = self.sharding_manager.update_weights_sync
         return update_func_call
 
     def set_params_meta(self, params_meta):
