@@ -120,6 +120,14 @@ class ParamUpdateManager:
         """Check if it's a generation master node"""
         return self.is_generation_node() and self.is_engine_master
     
+    def engine_idx(self):
+        """for global queue"""
+        return (self.rank - self.rank_offset) // self.engine_tp_size
+
+    def one_to_all_nums(self):
+        """for global queue"""
+        return self.engine_nums
+    
     def setup_for_ray_col(self, rank: int, size: int, rank_offset: int, engine_nums: int, engine_tp_size: int, is_engine_master: bool, name: str, backend: str = "nccl"):
         """Setup Ray communication - choose different communication methods based on parameter sync mode"""
         try:
@@ -529,7 +537,8 @@ class ParamUpdateManager:
         
         # First get groups info, ensure send and recv use same grouping
         # Force refresh to ensure dtype accuracy
-        self.get_params_meta(force_refresh=True)
+        if not self._params_meta:
+            self.get_params_meta()
         
         # If no func_call provided, use default update_buffer_data_only method
         if func_call is None:
@@ -553,7 +562,6 @@ class ParamUpdateManager:
     
     def async_param_update(self, func_call=None, sync_send=False):
         """Deprecated: Use sync_per_tensor_generator instead"""
-        enhanced_print("param_update", None, "async_param_update is deprecated, using sync_per_tensor_generator instead")
         return self.sync_per_tensor_generator(func_call)
 
     def get_params_iter(self, target_device="cpu", use_bucketed=False):
@@ -1028,7 +1036,7 @@ class ParamUpdateManager:
             store_ref = None
             if self.store_refs_queue is not None:
                 # Get object_refs info from queue, use blocking mode
-                queue_data = self.store_refs_queue[self.engine_idx()].get()  # 阻塞模式，无timeout
+                queue_data = self.store_refs_queue[self.engine_idx()].get()
                 if self.verbose_logging:
                     enhanced_print("param_update", None, f"Async recv: got queue_data for {queue_data.get('bucket_name') if queue_data else 'None'}, expecting {bucket_name}")
                 
@@ -1056,10 +1064,7 @@ class ParamUpdateManager:
                 # enhanced_print("param_update", None, f"i:{i}, rank:{self.rank} Async recv: completed {bucket_name} (version {version})")
             else:
                 enhanced_print("param_update", None, f"i:{i}, rank:{self.rank} Async recv: failed {bucket_name} (version {version})")
-            
-            if self.verbose_logging:
-                enhanced_print("param_update", None, f"Async recv: {bucket_name} processed")
-        
+
         t2 = time.time()
         # send / recv run independently, version from send
         self.current_version = version
@@ -1137,7 +1142,6 @@ class ParamUpdateManager:
             # NCCL GPU sync mode: no async threads, just add barrier
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-                enhanced_print("param_update", None, "All nodes completed send phase (NCCL sync mode)")
             return
         
         # CPU async mode: wait for async send thread

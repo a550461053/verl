@@ -1152,9 +1152,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
             gen_batch_output = await generation_task
             if gen_batch_output is None:
                 raise Exception(f"Generation failed for step {step}")
-            
-            enhanced_print("generate", None, f"Background generation completed for step {step}")
-            
+
             # Release engine resource lock after generation is complete
             await engine_resource_lock.release("generate")
             enhanced_print("generate", None, f"Released engine resource lock for step {step}")

@@ -689,7 +689,7 @@ class SGLangRollout(BaseRollout):
 
     def _wait_for_param_update_completion(self, timeout_seconds=150):
         if not hasattr(self.param_update_manager, '_param_update_start_time'):
-            print("[SGLangRollout] No param_update started, skipping wait")
+            # print("[SGLangRollout] No param_update started, skipping wait")
             return
         
         start_time = self.param_update_manager._param_update_start_time
