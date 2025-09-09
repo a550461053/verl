@@ -66,8 +66,6 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             ray_worker_group_cls: Custom Ray worker group class.
         """
         super().__init__(*args, **kwargs)
-        
-        self._overlap_param_update = self.config.actor_rollout_ref.get("overlap_param_update", True)
         self._async_logp_ref_logp = self.config.actor_rollout_ref.get("async_logp_ref_logp", True)
         self._async_pipeline = AsyncPipeline(max_queue_size=self.config.actor_rollout_ref.rollout.get("max_queue_size", 2))        
         from verl.trainer.ppo.pipeline.utils import is_ref_model_separated

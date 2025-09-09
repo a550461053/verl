@@ -259,20 +259,9 @@ class ParamUpdateManager:
         
         # Set completion flag to False at the start
         self._param_update_completed = False
-        
-        # Get groups info - different logic for train vs generation nodes
-        if self.is_train_node():
-            # Train nodes: generate params_meta from model_params
-            self.get_params_meta(force_refresh=True)
-            self._sync_meta_info_to_all_nodes()
-        else:
-            self._sync_meta_info_to_all_nodes()
-            
-            if not self._params_meta:
-                enhanced_print("param_update", None, "Generation node: no params_meta available")
-                self._param_update_completed = True  # Set to completed on failure
-                return False
-        
+
+        self._sync_meta_info_to_all_nodes()
+
         # Get parameter groups for bucket processing
         if not self._param_groups:
             groups, group_tensor_count = self._group_tensors_by_metas()
@@ -281,7 +270,7 @@ class ParamUpdateManager:
             for i, group in enumerate(groups):
                 bucket_name = f"bucket_{i}"
                 self._param_groups[bucket_name] = group
-        
+
         if self.is_train_node():
             # Create generator once and iterate through it efficiently
             per_tensor_param = self.get_params_iter(self.target_device, use_bucketed=False)
@@ -714,28 +703,32 @@ class ParamUpdateManager:
 
         enhanced_print("param_update", None, f"Generated {len(self._params_meta)} parameter metadata entries using bucketed generator")
         
-        # Mark that meta-info has been updated
-        self._meta_info_updated = True
-        
         return self._params_meta
 
     def set_params_meta(self, params_meta):
         """Set the parameters metadata."""
         self._params_meta = params_meta
     
-    def is_meta_info_updated(self):
+    def is_meta_info_needs_sync(self):
         """Check if meta-info has been updated and needs sync"""
-        return getattr(self, '_meta_info_updated', False)
+        return getattr(self, '_meta_info_needs_sync', True)
     
     def mark_meta_info_synced(self):
         """Mark that meta-info has been synced"""
-        self._meta_info_updated = False
+        self._meta_info_needs_sync = False
     
     def _sync_meta_info_to_all_nodes(self):
         """Sync updated meta-info to all nodes using Ray communication"""
+        # Skip if meta-info has already been synced
+        if not self.is_meta_info_needs_sync():
+            enhanced_print("param_update", None, "Meta-info already synced, skipping broadcast")
+            return
+
         # All nodes participate in broadcast - train master sends, others receive
         from ray.util.collective import broadcast
         
+        if self.is_train_node():
+            self.get_params_meta(force_refresh=True)
         if self.is_train_master_node():
             # Train master node: prepare and send meta-info
             meta_info_tensor = self._serialize_meta_info()
@@ -757,10 +750,11 @@ class ParamUpdateManager:
             self._params_meta = self._deserialize_meta_info(meta_info_tensor)
             enhanced_print("param_update", None, f"Received meta-info from train master: {len(self._params_meta)} entries")
         else:
-            # Train master: mark as synced
-            self._meta_info_updated = False
+            # Train master: broadcast completed
             enhanced_print("param_update", None, f"Broadcasted meta-info to all nodes: {len(self._params_meta)} entries")
-    
+
+        self.mark_meta_info_synced()
+
     
     def _serialize_meta_info(self):
         """Serialize meta-info to a tensor for broadcasting"""
