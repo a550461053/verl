@@ -34,6 +34,7 @@ class ParamUpdateManager:
         enable_param_async: bool = False,  # Modified: True=CPU async, False=NCCL GPU sync
         store_refs_queue = None,  # New: store refs queue
         param_update_preduce_bucket_size_mb: int = 512,  # New: parameter preprocessing bucket size
+        enable_fused_communication: bool = True,  # New: whether to use fused communication (flatten+concatenate)
     ):
         # Basic configuration
         self.model_params = model_params
@@ -48,6 +49,9 @@ class ParamUpdateManager:
         # Async RL optimization switch
         self.enable_async_rl = enable_async_rl
         
+        # Communication optimization switch
+        self.enable_fused_communication = enable_fused_communication
+
         # Log control switch
         self.verbose_logging = os.environ.get('PARAM_UPDATE_VERBOSE_LOG', 'false').lower() == 'true'
         
@@ -278,11 +282,21 @@ class ParamUpdateManager:
             per_tensor_param = None
 
         # Process each bucket
-        for bucket_name, group in self._param_groups.items():
-            enhanced_print("param_update", None, f"Processing {bucket_name}/{len(self._param_groups.items())} ({len(group)} tensors)")
+        bucket_start_time = time.time()
+        total_buckets = len(self._param_groups.items())
+
+        for bucket_idx, (bucket_name, group) in enumerate(self._param_groups.items()):
+            bucket_iter_start = time.time()
+            enhanced_print("param_update", None, f"Processing {bucket_name} ({bucket_idx+1}/{total_buckets}) - {len(group)} tensors")
 
             # All ranks participate in broadcast
             self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call)
+            
+            bucket_iter_time = time.time() - bucket_iter_start
+            enhanced_print("param_update", None, f"Bucket {bucket_name} completed in {bucket_iter_time:.4f}s")
+        
+        total_bucket_time = time.time() - bucket_start_time
+        enhanced_print("param_update", None, f"All {total_buckets} buckets processed in {total_bucket_time:.4f}s (avg: {total_bucket_time/total_buckets:.4f}s per bucket)")
 
         end_time = time.time()
         enhanced_print("param_update", None, f"GPU sync parameter update completed in {end_time - start_time:.2f} seconds")
@@ -290,7 +304,7 @@ class ParamUpdateManager:
         # Set completion flag to True at the end
         self._param_update_completed = True
         return True
-    
+
     def _sync_broadcast_bucket(self, per_tensor_param, group, bucket_name, func_call, clear_cache=False):
         """All ranks participate in broadcast - optimized with tensor concatenation"""
         from ray.util.collective import broadcast
@@ -313,19 +327,51 @@ class ParamUpdateManager:
             # Create a set of names we need for this bucket
             needed_names = {meta["name"] for meta in group}
             
-            # Iterate through generator and collect only needed tensors
+            # Collect only needed tensors from cache
+            tensor_count = 0
+
+            # Train nodes: cache only current bucket's tensors
+            bucket_tensors = {}
+            
+            # Monitor memory before bucket caching
+            if torch.cuda.is_available():
+                memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
+            
+            # Iterate through generator to find tensors for current bucket only
             for param_name, tensor in per_tensor_param:
                 if param_name in needed_names:
-                    # Ensure tensor is on GPU and flatten
+                    bucket_tensors[param_name] = tensor
+                    tensor_count += 1
+                    
+                    # Ensure tensor is on GPU
                     if tensor.device.type != 'cuda':
                         tensor = tensor.cuda()
-                    tensors.append(tensor.flatten())
+                    
+                    # Choose whether to flatten based on configuration
+                    if self.enable_fused_communication:
+                        flattened_tensor = tensor.flatten()
+                        tensors.append(flattened_tensor)
+                    else:
+                        # Use original tensor without flattening
+                        tensors.append(tensor)
+                    
                     tensor_names.append(param_name)
                     tensor_shapes.append(tensor.shape)
                     tensor_dtypes.append(tensor.dtype)
-                if len(needed_names) == len(tensor_names):
+                
+                # Break early if we found all needed tensors for this bucket
+                if len(tensor_names) >= len(needed_names):
                     break
             
+            # Monitor memory after bucket caching
+            if torch.cuda.is_available():
+                memory_after = torch.cuda.memory_allocated() / 1024**3  # GB
+                memory_delta = memory_after - memory_before
+                enhanced_print("param_update", None, f"  Bucket {bucket_name} memory: {memory_before:.2f}GB -> {memory_after:.2f}GB (delta: +{memory_delta:.2f}GB)")
+            
+            # Clear bucket cache to free memory immediately
+            del bucket_tensors
+        
             # Check if we found all needed tensors
             found_names = set(tensor_names)
             missing_names = needed_names - found_names
@@ -335,86 +381,106 @@ class ParamUpdateManager:
             
             # Check if all tensors have the same dtype
             unique_dtypes = set(tensor_dtypes)
-            if len(unique_dtypes) == 1:
-                # All tensors have the same dtype, can concatenate directly
-                concatenated_tensor = torch.cat(tensors, dim=0)
+            
+            # Choose communication strategy based on configuration
+            if self.enable_fused_communication:
+                # Fused communication: concatenate and broadcast once
+                if len(unique_dtypes) == 1:
+                    # All tensors have the same dtype, can concatenate directly
+                    concatenated_tensor = torch.cat(tensors, dim=0)
+                else:
+                    # Different dtypes detected - convert to common dtype
+                    enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, keeping original dtypes")
+                    first_dtype = tensors[0].dtype
+                    enhanced_print("param_update", None, f"Using {first_dtype} as common dtype for concatenation")
+                    
+                    converted_tensors = []
+                    for i, t in enumerate(tensors):
+                        if t.dtype != first_dtype:
+                            converted_t = t.to(first_dtype)
+                            converted_tensors.append(converted_t)
+                            del t
+                        else:
+                            converted_tensors.append(t)
+                    
+                    concatenated_tensor = torch.cat(converted_tensors, dim=0)
+                    del converted_tensors
+
+                # Broadcast the concatenated tensor
+                broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+                
+                # Clean up concatenated tensor
+                del concatenated_tensor
             else:
-                # Different dtypes detected - this should not happen in normal training
-                # Keep original dtypes and let SGLang handle the reconstruction
-                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, keeping original dtypes")
-                
-                # Use the first tensor's dtype as the common dtype for concatenation
-                # This preserves the original precision and lets SGLang handle reconstruction
-                first_dtype = tensors[0].dtype
-                enhanced_print("param_update", None, f"Using {first_dtype} as common dtype for concatenation")
-                
-                # Convert all tensors to the first tensor's dtype for concatenation
-                converted_tensors = []
-                for i, t in enumerate(tensors):
-                    if t.dtype != first_dtype:
-                        # Convert to first tensor's dtype
-                        converted_t = t.to(first_dtype)
-                        converted_tensors.append(converted_t)
-                        # Clear original tensor to free memory
-                        del t
-                    else:
-                        converted_tensors.append(t)
-                
-                concatenated_tensor = torch.cat(converted_tensors, dim=0)
-                
-                # Clear converted tensors to free memory
-                del converted_tensors
-            
-            # Broadcast the concatenated tensor
-            broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
-            
+                # Individual communication: broadcast each tensor separately
+                for i, tensor in enumerate(tensors):
+                    broadcast(tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+
             if self.verbose_logging:
-                enhanced_print("param_update", None, f"Broadcasted concatenated tensor with {len(tensors)} tensors in {bucket_name}")
+                enhanced_print("param_update", None, f"Broadcasted {len(tensors)} individual tensors in {bucket_name}")
             
-            received_tensors = []
             # Clear memory after broadcast
             for tensor in tensors:
                 del tensor
-            del concatenated_tensor
             del tensors
             
             # Force garbage collection and clear cache
             local_clear_cache()
         else:
-            # Generation nodes: receive concatenated tensor
-            total_size = 0
-            for meta in group:
-                shape = meta["shape"]
-                total_size += torch.prod(torch.tensor(shape)).item()
-            
-            # Check if all tensors in group have the same dtype
+            # Generation nodes: receive tensors based on communication strategy
             unique_dtypes = set(meta["dtype"] for meta in group)
-            if len(unique_dtypes) == 1:
-                # All tensors have the same dtype
-                first_dtype = group[0]["dtype"]
-                concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
-            else:
-                # Mixed dtypes, use first tensor's dtype as common dtype
-                first_dtype = group[0]["dtype"]
-                enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using {first_dtype}")
-                concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
             
-            broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
-            
-            # Split the concatenated tensor back into individual tensors
-            received_tensors = []
-            start_idx = 0
-            for i, meta in enumerate(group):
-                name = meta["name"]
-                shape = meta["shape"]
-                dtype = meta["dtype"]
+            if self.enable_fused_communication:
+                # Fused communication: receive concatenated tensor and split
+                total_size = 0
+                for meta in group:
+                    shape = meta["shape"]
+                    total_size += torch.prod(torch.tensor(shape)).item()
                 
-                tensor_size = torch.prod(torch.tensor(shape)).item()
-                tensor_data = concatenated_tensor[start_idx:start_idx + tensor_size]
-                tensor = tensor_data.reshape(shape).to(dtype)
-                received_tensors.append((name, tensor))
-                start_idx += tensor_size
-            
+                if len(unique_dtypes) == 1:
+                    first_dtype = group[0]["dtype"]
+                    concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
+                else:
+                    first_dtype = group[0]["dtype"]
+                    enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using {first_dtype}")
+                    concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
+
+                # Receive the concatenated tensor
+                broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+
+                # Split the concatenated tensor back into individual tensors
+                received_tensors = []
+                start_idx = 0
+                for i, meta in enumerate(group):
+                    name = meta["name"]
+                    shape = meta["shape"]
+                    dtype = meta["dtype"]
+                    
+                    tensor_size = torch.prod(torch.tensor(shape)).item()
+                    tensor_data = concatenated_tensor[start_idx:start_idx + tensor_size]
+                    tensor = tensor_data.reshape(shape).to(dtype)
+                    received_tensors.append((name, tensor))
+                    start_idx += tensor_size
+
+                # Clean up concatenated tensor
+                del concatenated_tensor
+            else:
+                # Individual communication: receive each tensor separately
+                # Receive each tensor individually
+                received_tensors = []
+                for i, meta in enumerate(group):
+                    name = meta["name"]
+                    shape = meta["shape"]
+                    dtype = meta["dtype"]
+                    
+                    # Allocate tensor for receiving
+                    tensor = torch.zeros(shape, dtype=dtype, device="cuda")
+                    
+                    # Receive the tensor
+                    broadcast(tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+                    
+                    received_tensors.append((name, tensor))
+
             if self.verbose_logging:
                 enhanced_print("param_update", None, f"Received and split {len(received_tensors)} tensors in {bucket_name}")
         
@@ -427,14 +493,10 @@ class ParamUpdateManager:
             for name, tensor in received_tensors:
                 del tensor
             del received_tensors
-            del concatenated_tensor
             
             # Force garbage collection but don't clear cache during NCCL communication
             local_clear_cache()
-        
-        # barrier ray col
-        from ray.util.collective import barrier
-        barrier(group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))
+
         return True
     
     def _sync_send_bucket(self, group, bucket_name):
