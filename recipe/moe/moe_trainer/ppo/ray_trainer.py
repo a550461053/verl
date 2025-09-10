@@ -248,7 +248,8 @@ def compute_advantage(
         lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
         multi_turn (bool, optional): Whether the data is from a multi-turn conversation. Defaults to False.
-        norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in GRPO. Defaults to True.
+        norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in GRPO.
+            Defaults to True.
 
     Returns:
         DataProto: The updated data with computed advantages and returns.
@@ -451,7 +452,8 @@ class RayPPOTrainer:
             assert (
                 n_gpus % (model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size) == 0
             ), (
-                f"n_gpus ({n_gpus}) must be divisible by model_parallel_size ({model_parallel_size}) times context_parallel_size ({config.actor_rollout_ref.actor.megatron.context_parallel_size})"
+                f"n_gpus ({n_gpus}) must be divisible by model_parallel_size ({model_parallel_size}) "
+                f"times context_parallel_size ({config.actor_rollout_ref.actor.megatron.context_parallel_size})"
             )
             megatron_dp = n_gpus // (
                 model_parallel_size * config.actor_rollout_ref.actor.megatron.context_parallel_size
@@ -463,7 +465,8 @@ class RayPPOTrainer:
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         assert real_train_batch_size % minimal_bsz == 0, (
-            f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size ({minimal_bsz})"
+            f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible "
+            f"batch size ({minimal_bsz})"
         )
 
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
@@ -488,7 +491,8 @@ class RayPPOTrainer:
 
                 if mbs is not None and mbs_per_gpu is not None:
                     raise ValueError(
-                        f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. Please remove '{name}.{param}' because only '*_{param_per_gpu}'"
+                        f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. "
+                        f"Please remove '{name}.{param}' because only '*_{param_per_gpu}'"
                         + "is supported (the former is deprecated)."
                     )
 
@@ -650,7 +654,8 @@ class RayPPOTrainer:
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
 
         print(
-            f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: {len(self.val_dataloader)}"
+            f"Size of train dataloader: {len(self.train_dataloader)}, "
+            f"Size of val dataloader: {len(self.val_dataloader)}"
         )
 
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs

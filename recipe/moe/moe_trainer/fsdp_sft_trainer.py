@@ -31,8 +31,12 @@ import hydra
 import pandas as pd
 import torch
 import torch.distributed
-
-# from peft import LoraConfig, TaskType, get_peft_model
+from cybertron.data.datasets.gpt_dataset_ext import GPTDatasetExt, GPTDatasetExtConfig
+from cybertron.tokenizer.tokenizer import HFTokenizer
+from megatron.core.datasets.blended_megatron_dataset_builder import (
+    BlendedMegatronDatasetBuilder,
+)
+from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch import nn, optim
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -86,13 +90,7 @@ def _zero_next_index(self):
 # torch.utils.data.dataloader._BaseDataLoaderIter._next_index = _zero_next_index
 
 
-from cybertron.data.datasets.gpt_dataset_ext import GPTDatasetExt, GPTDatasetExtConfig
-
 # from megatron.core.datasets.utils import get_blend_from_list
-from cybertron.tokenizer.tokenizer import HFTokenizer
-from megatron.core.datasets.blended_megatron_dataset_builder import (
-    BlendedMegatronDatasetBuilder,
-)
 
 
 def build_dataset(tokenizer_path):
@@ -156,7 +154,7 @@ class MultiTurnSFTDataset(OriginMultiTurnSFTDataset):
             import numpy
             import pandas
 
-            while isinstance(ls, (pandas.core.series.Series, numpy.ndarray)) and len(ls) == 1:
+            while isinstance(ls, pandas.core.series.Series | numpy.ndarray) and len(ls) == 1:
                 ls = ls[0]
             return ls
 
@@ -176,8 +174,7 @@ class MultiTurnSFTDataset(OriginMultiTurnSFTDataset):
                 raise
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
-        # if os.getenv("DEBUG", None) != None and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-        #     torch.distributed.barrier()
+
         # Extract messages list from dataframe
         self.messages = self.dataframe[self.messages_key].apply(series_to_item).tolist()
 
@@ -188,7 +185,7 @@ class SFTDataset(OriginSFTDataset):
             import numpy
             import pandas
 
-            while isinstance(ls, (pandas.core.series.Series, numpy.ndarray)) and len(ls) == 1:
+            while isinstance(ls, pandas.core.series.Series | numpy.ndarray) and len(ls) == 1:
                 ls = ls[0]
             return ls
 
@@ -388,7 +385,7 @@ class FSDPSFTTrainer:
             cpu_offload = None
         else:
             cpu_offload = CPUOffload(offload_params=self.config.model.fsdp_config.offload_params)
-        if os.getenv("BIT_DUMP", None) != None:
+        if os.getenv("BIT_DUMP", None) is not None:
             from moe_trainer.bitdump import hook_fwd_bwd_to_module
 
             # names = ["decoder.layers.0*", "decoder.layers.1*"]
@@ -458,7 +455,8 @@ class FSDPSFTTrainer:
 
         if self.device_mesh.get_rank() == 0:
             print(
-                f"Number of steps/epoch {self.steps_per_epoch}, number of epochs {self.config.trainer.total_epochs}, total number of steps {self.total_steps}"
+                f"Number of steps/epoch {self.steps_per_epoch}, number of epochs "
+                f"{self.config.trainer.total_epochs}, total number of steps {self.total_steps}"
             )
 
         num_warmup_steps = int(self.total_steps * self.config.optim.warmup_steps_ratio)
@@ -723,7 +721,6 @@ class FSDPSFTTrainer:
                     tracking.log(data=metric, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.config.trainer.test_freq == 0
                 is_save_step = global_step % self.config.trainer.save_freq == 0
 
                 # early exit or validation step

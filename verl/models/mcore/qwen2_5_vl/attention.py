@@ -16,11 +16,12 @@
 
 from typing import Optional
 
-BaseInferenceContext = None
-PackedSeqParams = None
 from megatron.core.transformer.attention import *
 
 from .rope_utils import apply_rotary_pos_emb_absolute
+
+BaseInferenceContext = None
+PackedSeqParams = None
 
 
 class Qwen2_5VLSelfAttention(SelfAttention):

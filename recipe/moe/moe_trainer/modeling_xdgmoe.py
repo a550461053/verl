@@ -1,4 +1,4 @@
-# Copyright 2023 XdgMoE-AI and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 hilab team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
@@ -16,8 +16,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-print("--------------Shared Modeling---------------")
-""" PyTorch XdgMoE model."""
+"""PyTorch XdgMoE model."""
+
 import math
 import warnings
 from typing import Optional
@@ -88,7 +88,9 @@ def _get_unpad_data(attention_mask):
 
 def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
     warnings.warn(
-        "Calling `transformers.models.XdgMoE.modeling_XdgMoE._prepare_4d_attention_mask` is deprecated and will be removed in v4.37. Use `transformers.modeling_attn_mask_utils._prepare_4d_attention_mask"
+        "Calling `transformers.models.XdgMoE.modeling_XdgMoE._prepare_4d_attention_mask` is deprecated "
+        "and will be removed in v4.37. Use `transformers.modeling_attn_mask_utils._prepare_4d_attention_mask",
+        stacklevel=2,
     )
     return _prepare_4d_attention_mask(mask=mask, dtype=dtype, tgt_len=tgt_len)
 
@@ -97,7 +99,10 @@ def _make_causal_mask(
     input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
 ):
     warnings.warn(
-        "Calling `transformers.models.XdgMoE.modeling_XdgMoE._make_causal_mask` is deprecated and will be removed in v4.37. Use `transformers.models.XdgMoE.modeling_XdgMoE.AttentionMaskConverter._make_causal_mask"
+        "Calling `transformers.models.XdgMoE.modeling_XdgMoE._make_causal_mask` is deprecated "
+        "and will be removed in v4.37. Use "
+        "`transformers.models.XdgMoE.modeling_XdgMoE.AttentionMaskConverter._make_causal_mask",
+        stacklevel=2,
     )
     return AttentionMaskConverter._make_causal_mask(
         input_ids_shape=input_ids_shape, dtype=dtype, device=device, past_key_values_length=past_key_values_length
@@ -570,7 +575,9 @@ class XdgMoEAttention(nn.Module):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
             warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. "
+                "Please make sure use `attention_mask` instead.`",
+                stacklevel=2,
             )
 
         bsz, q_len, _ = hidden_states.size()
@@ -679,8 +686,11 @@ class XdgMoEFlashAttention2(XdgMoEAttention):
         super().__init__(*args, **kwargs)
 
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
-        # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
-        # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
+        # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is
+        # bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is
+        # used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
+        # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case
+        # q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
 
     def forward(
@@ -696,7 +706,9 @@ class XdgMoEFlashAttention2(XdgMoEAttention):
         # XdgMoEFlashAttention2 attention does not support output_attentions
         if "padding_mask" in kwargs:
             warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. "
+                "Please make sure use `attention_mask` instead.`",
+                stacklevel=2,
             )
 
             # overwrite attention_mask with padding_mask
@@ -729,7 +741,8 @@ class XdgMoEFlashAttention2(XdgMoEAttention):
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+        # TODO: These transpose are quite inefficient but Flash Attention requires the layout
+        # [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
@@ -799,7 +812,8 @@ class XdgMoEFlashAttention2(XdgMoEAttention):
         if not self._flash_attn_uses_top_left_mask:
             causal = self.is_causal
         else:
-            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in XdgMoEFlashAttention2 __init__.
+            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1.
+            # For details, please see the comment in XdgMoEFlashAttention2 __init__.
             causal = self.is_causal and query_length != 1
 
         # Contains at least one padding token in the sequence
@@ -890,10 +904,13 @@ class XdgMoESdpaAttention(XdgMoEAttention):
         use_cache: bool = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
+            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"`
+            # once this is implemented.
             logger.warning_once(
-                "XdgMoEModel is using XdgMoESdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                "XdgMoEModel is using XdgMoESdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` "
+                "does not support `output_attentions=True`. Falling back to the manual attention implementation, "
+                "but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. "
+                'This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
             return super().forward(
                 hidden_states=hidden_states,
@@ -938,7 +955,8 @@ class XdgMoESdpaAttention(XdgMoEAttention):
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
 
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous
+        # inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
         if query_states.device.type == "cuda" and attention_mask is not None:
             query_states = query_states.contiguous()
@@ -951,7 +969,8 @@ class XdgMoESdpaAttention(XdgMoEAttention):
             value_states,
             attn_mask=attention_mask,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+            # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not
+            # create a causal mask in case q_len == 1.
             is_causal=self.is_causal and attention_mask is None and q_len > 1,
         )
 
@@ -1015,7 +1034,9 @@ class XdgMoEDecoderLayer(nn.Module):
         """
         if "padding_mask" in kwargs:
             warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. "
+                "Please make sure use `attention_mask` instead.`",
+                stacklevel=2,
             )
         residual = hidden_states
 
@@ -1232,7 +1253,8 @@ class XdgMoEModel(XdgMoEPreTrainedModel):
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`transformers."
+                    "`use_cache=True` is incompatible with gradient checkpointing. "
+                    "Setting `use_cache=False`transformers."
                 )
                 use_cache = False
 
@@ -1381,7 +1403,8 @@ class XdgMoEForCausalLM(XdgMoEPreTrainedModel):
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
                 Labels for computing the masked language modeling loss. Indices should either be in `[0, transformers.,
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, transformers., config.vocab_size]`.
+                (masked), the loss is only computed for the tokens with labels in "
+                "`[0, transformers., config.vocab_size]`."
 
         Returns:
 
@@ -1719,3 +1742,6 @@ class XdgMoEForTokenClassification(XdgMoEPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+print("--------------Shared Modeling---------------")

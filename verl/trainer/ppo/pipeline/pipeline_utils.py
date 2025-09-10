@@ -1,3 +1,16 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Asynchronous Pipeline management class, responsible for data flow and queue management between roles
 
@@ -200,7 +213,6 @@ class AsyncPipeline:
 
         first_queue_name = "rollout_to_dataloader"
         last_queue_name = "dataloader_to_rollout"
-        first_pipeline_queue = self._queue_pairs.get(first_queue_name)
         last_pipeline_queue = self._queue_pairs.get(last_queue_name)
 
         def _get_keys_before_cur_queue():
@@ -292,14 +304,16 @@ class AsyncPipeline:
                 enhanced_print(
                     src_role,
                     dst_role,
-                    f"DIRECT OBJECT STORE: {use_queue_name} ray_put={ray_put_time:.3f}s, total={total_time:.3f}s, refs_count={len(self._object_store_pairs[use_queue_name])}",
+                    f"DIRECT OBJECT STORE: {use_queue_name} ray_put={ray_put_time:.3f}s, "
+                    f"total={total_time:.3f}s, refs_count={len(self._object_store_pairs[use_queue_name])}",
                 )
 
             if debug_log and total_time > 1.0:
                 enhanced_print(
                     src_role,
                     dst_role,
-                    f"⚠️ SLOW DIRECT PUT: {use_queue_name} took {total_time:.2f}s (ray_put: {ray_put_time:.2f}s) on node={current_node_id[:8]}",
+                    f"⚠️ SLOW DIRECT PUT: {use_queue_name} took {total_time:.2f}s "
+                    f"(ray_put: {ray_put_time:.2f}s) on node={current_node_id[:8]}",
                 )
         else:
             # Use Ray queue
@@ -331,14 +345,18 @@ class AsyncPipeline:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"RAY_PUT OPTIMIZATION: {use_queue_name} ray_put={ray_put_time:.3f}s, queue_put={queue_put_time:.3f}s, total={total_time:.3f}s, queue={queue_size_before}->{queue_size_after}, node={current_node_id[:8]}",
+                        f"RAY_PUT OPTIMIZATION: {use_queue_name} ray_put={ray_put_time:.3f}s, "
+                        f"queue_put={queue_put_time:.3f}s, total={total_time:.3f}s, "
+                        f"queue={queue_size_before}->{queue_size_after}, node={current_node_id[:8]}",
                     )
 
                 if debug_log and total_time > 1.0:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"⚠️ SLOW RAY_PUT: {use_queue_name} took {total_time:.2f}s (ray_put: {ray_put_time:.2f}s, queue_put: {queue_put_time:.2f}s) on node={current_node_id[:8]}",
+                        f"⚠️ SLOW RAY_PUT: {use_queue_name} took {total_time:.2f}s "
+                        f"(ray_put: {ray_put_time:.2f}s, queue_put: {queue_put_time:.2f}s) "
+                        f"on node={current_node_id[:8]}",
                     )
             elif self.transfer_mode == TransferMode.RAY_QUEUE_COMPRESSED:
                 # Original method: compression + queue transfer
@@ -365,14 +383,17 @@ class AsyncPipeline:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"PUT_ASYNC ANALYSIS: {use_queue_name} put_async={put_time:.3f}s, compress={compress_time:.3f}s, total={total_time:.3f}s, queue={queue_size_before}->{queue_size_after}",
+                        f"PUT_ASYNC ANALYSIS: {use_queue_name} put_async={put_time:.3f}s, "
+                        f"compress={compress_time:.3f}s, total={total_time:.3f}s, "
+                        f"queue={queue_size_before}->{queue_size_after}",
                     )
 
                 if debug_log and total_time > 1.0:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"⚠️ SLOW PUSH: {use_queue_name} took {total_time:.2f}s (put_async: {put_time:.2f}s, compress: {compress_time:.2f}s) on node={current_node_id[:8]}",
+                        f"⚠️ SLOW PUSH: {use_queue_name} took {total_time:.2f}s "
+                        f"(put_async: {put_time:.2f}s, compress: {compress_time:.2f}s) on node={current_node_id[:8]}",
                     )
             else:  # RAY_QUEUE mode
                 # Original method: compression + queue transfer
@@ -394,14 +415,17 @@ class AsyncPipeline:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"PUT_ASYNC ANALYSIS: {use_queue_name} put_async={put_time:.3f}s, compress={compress_time:.3f}s, total={total_time:.3f}s, queue={queue_size_before}->{queue_size_after}",
+                        f"PUT_ASYNC ANALYSIS: {use_queue_name} put_async={put_time:.3f}s, "
+                        f"compress={compress_time:.3f}s, total={total_time:.3f}s, "
+                        f"queue={queue_size_before}->{queue_size_after}",
                     )
 
                 if debug_log and total_time > 1.0:
                     enhanced_print(
                         src_role,
                         dst_role,
-                        f"⚠️ SLOW PUSH: {use_queue_name} took {total_time:.2f}s (put_async: {put_time:.2f}s, compress: {compress_time:.2f}s) on node={current_node_id[:8]}",
+                        f"⚠️ SLOW PUSH: {use_queue_name} took {total_time:.2f}s "
+                        f"(put_async: {put_time:.2f}s, compress: {compress_time:.2f}s) on node={current_node_id[:8]}",
                     )
 
         return True
@@ -436,7 +460,8 @@ class AsyncPipeline:
                 enhanced_print(
                     "pipeline",
                     None,
-                    f"Data compressed: {len(serialized)} -> {len(compressed)} bytes (ratio: {compression_ratio:.2f}) using {compression_lib.__name__}",
+                    f"Data compressed: {len(serialized)} -> {len(compressed)} bytes "
+                    f"(ratio: {compression_ratio:.2f}) using {compression_lib.__name__}",
                 )
                 return {"compressed": True, "data": compressed, "compression_lib": compression_lib.__name__}
             else:
@@ -492,7 +517,8 @@ class AsyncPipeline:
                 enhanced_print(
                     dst_role,
                     src_role,
-                    f"DIRECT OBJECT STORE GET: {use_queue_name} ray_get={ray_get_time:.3f}s, total={total_time:.3f}s, remaining_refs={len(self._object_store_pairs[use_queue_name])}",
+                    f"DIRECT OBJECT STORE GET: {use_queue_name} ray_get={ray_get_time:.3f}s, "
+                    f"total={total_time:.3f}s, remaining_refs={len(self._object_store_pairs[use_queue_name])}",
                 )
 
             if debug_log and total_time > 1.0:
@@ -533,14 +559,16 @@ class AsyncPipeline:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"RAY_GET OPTIMIZATION: {use_queue_name} queue_get={queue_get_time:.3f}s, ray_get={ray_get_time:.3f}s, total={total_time:.3f}s",
+                        f"RAY_GET OPTIMIZATION: {use_queue_name} queue_get={queue_get_time:.3f}s, "
+                        f"ray_get={ray_get_time:.3f}s, total={total_time:.3f}s",
                     )
 
                 if debug_log and total_time > 1.0:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"⚠️ SLOW RAY_GET: {use_queue_name} took {total_time:.2f}s (queue_get: {queue_get_time:.2f}s, ray_get: {ray_get_time:.2f}s)",
+                        f"⚠️ SLOW RAY_GET: {use_queue_name} took {total_time:.2f}s "
+                        f"(queue_get: {queue_get_time:.2f}s, ray_get: {ray_get_time:.2f}s)",
                     )
             elif self.transfer_mode == TransferMode.RAY_QUEUE_COMPRESSED:
                 # Original method: decompression processing
@@ -568,7 +596,8 @@ class AsyncPipeline:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"GET_ASYNC ANALYSIS: {use_queue_name} get_async={get_time:.3f}s, decompress={decompress_time:.3f}s, total={total_time:.3f}s",
+                        f"GET_ASYNC ANALYSIS: {use_queue_name} get_async={get_time:.3f}s, "
+                        f"decompress={decompress_time:.3f}s, total={total_time:.3f}s",
                     )
 
                 # Print warning if total time exceeds 1 second
@@ -576,7 +605,8 @@ class AsyncPipeline:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"⚠️ SLOW PULL: {use_queue_name} took {total_time:.2f}s (get_async: {get_time:.2f}s, decompress: {decompress_time:.2f}s)",
+                        f"⚠️ SLOW PULL: {use_queue_name} took {total_time:.2f}s "
+                        f"(get_async: {get_time:.2f}s, decompress: {decompress_time:.2f}s)",
                     )
             else:  # RAY_QUEUE mode
                 # Original method: decompression processing
@@ -604,7 +634,8 @@ class AsyncPipeline:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"GET_ASYNC ANALYSIS: {use_queue_name} get_async={get_time:.3f}s, decompress={decompress_time:.3f}s, total={total_time:.3f}s",
+                        f"GET_ASYNC ANALYSIS: {use_queue_name} get_async={get_time:.3f}s, "
+                        f"decompress={decompress_time:.3f}s, total={total_time:.3f}s",
                     )
 
                 # Print warning if total time exceeds 1 second
@@ -612,7 +643,8 @@ class AsyncPipeline:
                     enhanced_print(
                         dst_role,
                         src_role,
-                        f"⚠️ SLOW PULL: {use_queue_name} took {total_time:.2f}s (get_async: {get_time:.2f}s, decompress: {decompress_time:.2f}s)",
+                        f"⚠️ SLOW PULL: {use_queue_name} took {total_time:.2f}s "
+                        f"(get_async: {get_time:.2f}s, decompress: {decompress_time:.2f}s)",
                     )
 
         return result
@@ -650,7 +682,8 @@ class AsyncPipeline:
             enhanced_print(
                 "pipeline",
                 None,
-                f"Data decompressed: {len(compressed_data)} -> {len(decompressed)} bytes using {compression_lib.__name__}",
+                f"Data decompressed: {len(compressed_data)} -> {len(decompressed)} bytes "
+                f"using {compression_lib.__name__}",
             )
             return data
         except Exception as e:
@@ -675,7 +708,8 @@ class AsyncPipeline:
             # Bypass queue mode, return object store list
             if use_queue_name not in self._object_store_pairs:
                 raise ValueError(
-                    f"Object store pair {use_queue_name} not found in object store pairs: {self._object_store_pairs.keys()}"
+                    f"Object store pair {use_queue_name} not found in object store pairs: "
+                    f"{self._object_store_pairs.keys()}"
                 )
             return self._object_store_pairs[use_queue_name]
         elif self.transfer_mode == TransferMode.HYBRID:

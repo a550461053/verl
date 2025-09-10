@@ -1,3 +1,16 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 State machine implementation with state-machine for n-step off-policy Async-RL training.
 
@@ -33,7 +46,7 @@ from verl.trainer.ppo.ray_trainer import (
     compute_timing_metrics,
     marked_timer,
 )
-from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.reward import compute_reward
 from verl.utils.metric import (
     reduce_metrics,
 )
@@ -223,7 +236,7 @@ class RolloutStateMachine(BaseRoleStateMachine):
             return {"step": None, "batch_dict": None, "batch": None, "pipeline_signal": PIPELINE_END_SIGNAL}
 
         # Handle two cases: only dataloader data, or dataloader+generate data
-        assert isinstance(data, (int, tuple, list)) and len(data) == 3, f"Invalid data format: {data}"
+        assert isinstance(data, int | tuple | list) and len(data) == 3, f"Invalid data format: {data}"
         # Check if it's (dataloader_data, generate_data) format
         cur_global_steps, train_batch, gen_batch_output = data
         batch_dict = train_batch
@@ -895,7 +908,6 @@ class ParamUpdateStateMachine(BaseRoleStateMachine):
             "max_time": 0.0,
         }
 
-        rollout_wg = self.trainer.rollout_wg
         actor_wg = self.trainer.actor_wg
         self.has_param_update_manager = hasattr(actor_wg, "async_param_update")
 
@@ -1249,7 +1261,7 @@ class GenerateStateMachine(BaseRoleStateMachine):
         elif data is None:
             return None
 
-        if not isinstance(data, (tuple, list)) or len(data) != 2:
+        if not isinstance(data, tuple | list) or len(data) != 2:
             enhanced_print("generate", None, f"Invalid data format: {data}")
             return None
 
@@ -1261,7 +1273,8 @@ class GenerateStateMachine(BaseRoleStateMachine):
             enhanced_print(
                 "generate",
                 None,
-                f"Step {step} is too far ahead of param_update {self.last_param_update_step}, waiting for next param_update...",
+                f"Step {step} is too far ahead of param_update {self.last_param_update_step}, "
+                f"waiting for next param_update...",
             )
             param_update_signal = await self.pipeline.pull("param_update", "generate")
 
@@ -1361,7 +1374,8 @@ class ValidationStateMachine(BaseRoleStateMachine):
                 enhanced_print(
                     "validation",
                     None,
-                    f"Validation skipped for step {current_step}, next at {self.last_validation_step + self.validation_freq}",
+                    f"Validation skipped for step {current_step}, "
+                    f"next at {self.last_validation_step + self.validation_freq}",
                 )
                 # Send None to indicate validation was skipped
                 await self.pipeline.push("validation", "train", None)
@@ -1494,7 +1508,7 @@ def create_role_state_machine(role_name: str, pipeline, trainer, use_async_rl: b
     Create a role state machine factory function
 
     Args:
-        role_name: role name, e.g., "dataloader", "rollout", "reward", "param_update", "generate", "logp", "ref_logp", "train"
+        role_name: role name, e.g., "dataloader", "rollout", "reward", "param_update", "generate", etc.
         pipeline: pipeline instance
         trainer: trainer instance
         use_async_rl: Whether to use async RL optimization (default False)

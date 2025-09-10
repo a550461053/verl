@@ -38,7 +38,6 @@ from megatron.core import parallel_state as mpu
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, Execute, make_nd_compute_dataproto_dispatch_fn, register
-from verl.single_controller.base.megatron.worker import MegatronWorker
 from verl.utils import hf_tokenizer
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
@@ -553,9 +552,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
                 if train_ranks and generate_ranks:
                     param_update_manager.register_actor_clusters(train_ranks, generate_ranks, world_size)
-                    print(
-                        f"Registered actor clusters: train_ranks={train_ranks}, generate_ranks={generate_ranks}, world_size={world_size}"
-                    )
+                    print(f"Registered actor clusters: {train_ranks}, {generate_ranks}, world_size={world_size}")
         else:
             # ref does not need param update manager
             param_update_manager = None
@@ -946,12 +943,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self._is_rollout
         prompts.batch = prompts.batch.to(get_device_name())
         meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id
-            if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id
-            if self.generation_config is not None
-            else self.tokenizer.pad_token_id,
+            "eos_token_id": (
+                self.generation_config.eos_token_id
+                if self.generation_config is not None
+                else self.tokenizer.eos_token_id
+            ),
+            "pad_token_id": (
+                self.generation_config.pad_token_id
+                if self.generation_config is not None
+                else self.tokenizer.pad_token_id
+            ),
         }
         prompts.meta_info.update(meta_info)
         if self._is_offload_optimizer:
@@ -991,12 +992,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self._is_rollout
         prompts.batch = prompts.batch.cuda()
         meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id
-            if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id
-            if self.generation_config is not None
-            else self.tokenizer.pad_token_id,
+            "eos_token_id": (
+                self.generation_config.eos_token_id
+                if self.generation_config is not None
+                else self.tokenizer.eos_token_id
+            ),
+            "pad_token_id": (
+                self.generation_config.pad_token_id
+                if self.generation_config is not None
+                else self.tokenizer.pad_token_id
+            ),
         }
         prompts.meta_info.update(meta_info)
 

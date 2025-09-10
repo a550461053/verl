@@ -572,7 +572,8 @@ class RayWorkerGroup(WorkerGroup):
                 return remote_call.remote(*args, **kwargs)
         # No matching method found; raise explicit error
         raise AttributeError(
-            f"ActorHandle has no method '{method_name}' or any of {[p + '_' + method_name for p in ('rollout', 'actor', 'critic', 'reward')]}."
+            f"ActorHandle has no method '{method_name}' or any of "
+            f"{[p + '_' + method_name for p in ('rollout', 'actor', 'critic', 'reward')]}."
         )
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):

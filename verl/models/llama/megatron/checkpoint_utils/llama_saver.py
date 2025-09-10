@@ -413,9 +413,11 @@ def merge_megatron_ckpt_llama(wrapped_models, config, dtype, is_value_model=Fals
                 src_pp_rank=pp_size - 1,
             )
             _broadcast_tensor(
-                gpt_model_module.reward_head.weight
-                if pp_rank == pp_size - 1 and getattr(gpt_model_module, "reward_weight", None) is not None
-                else None,
+                (
+                    gpt_model_module.reward_head.weight
+                    if pp_rank == pp_size - 1 and getattr(gpt_model_module, "reward_weight", None) is not None
+                    else None
+                ),
                 "reward_head.weight",
                 src_pp_rank=pp_size - 1,
             )

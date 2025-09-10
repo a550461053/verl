@@ -1,3 +1,16 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Real dual-buffer SGLang engine implementation
 
@@ -15,9 +28,10 @@ import time
 
 import torch
 from sglang.srt.entrypoints.engine import UpdateWeightsFromTensorReqInput
-from sglang.srt.managers.tokenizer_manager import (
-    UpdateWeightsFromTensorReqInput,
-)
+
+# from sglang.srt.managers.tokenizer_manager import (
+#     UpdateWeightsFromTensorReqInput,
+# )
 from sglang.srt.utils import (
     MultiprocessingSerializer,
 )
@@ -276,7 +290,6 @@ class _BufferManager:
                     ser_list = []
                     for tp_idx in range(self.tp_size):
                         if self._use_torch_fd:
-                            # Build independent [(name, tensor)] list for current tp, avoid extra clone copy, serialization itself allocates unique FD
                             tensors_copy = [(n, t) for n, t in batch]
                             serialized = MultiprocessingSerializer.serialize(tensors_copy)
                         else:
@@ -507,7 +520,7 @@ class DualBufferAsyncEngine:
                 return self._latest_version
 
         def set_version(self, version):
-            """Set version number - used for external version management (guarantee monotonic increase), and not rollback current_version"""
+            """Set version number"""
             with self._update_lock:
                 if version > self._latest_version:
                     self._latest_version = version
@@ -548,7 +561,7 @@ class DualBufferAsyncEngine:
                                 enhanced_print(
                                     "DualBufferAsyncEngine",
                                     None,
-                                    f"Successfully switched to buffer {target_buffer} for version {self._latest_version}",
+                                    f"Successfully switched to buffer {target_buffer} ({self._latest_version})",
                                 )
                                 return True
                     else:
@@ -568,7 +581,7 @@ class DualBufferAsyncEngine:
                     enhanced_print("DualBufferAsyncEngine", None, f"Buffer {buffer_id} not ready, cannot switch")
                     return False
 
-                # Apply weights of new buffer to engine (only switch active_buffer and current_version after successful application)
+                # Apply weights of new buffer to engine
                 t1 = time.time()
                 buffer = self._get_buffer(buffer_id)
                 if buffer is None:

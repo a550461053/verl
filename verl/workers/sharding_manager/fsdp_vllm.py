@@ -147,9 +147,11 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                         if self.base_sync_done:
                             lora_params = get_peft_model_state_dict(peft_model)
                             lora_params = {
-                                name: param.full_tensor().detach().cpu()
-                                if hasattr(param, "full_tensor")
-                                else param.detach().cpu()
+                                name: (
+                                    param.full_tensor().detach().cpu()
+                                    if hasattr(param, "full_tensor")
+                                    else param.detach().cpu()
+                                )
                                 for name, param in lora_params.items()
                             }
                         else:

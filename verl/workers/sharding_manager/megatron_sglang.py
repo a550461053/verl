@@ -150,40 +150,17 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             await self.inference_engine.resume_memory_occupation()
         named_tensors = params
 
-        if sgl_update_weights is not None:
-            update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
-            for params_batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
-                await sgl_update_weights(
-                    engine=self.inference_engine,
-                    params_batch=params_batch,
-                    device_mesh_key="tp",
-                    device_mesh=self.device_mesh,
-                )
+        update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
+        for params_batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
+            await sgl_update_weights(
+                engine=self.inference_engine,
+                params_batch=params_batch,
+                device_mesh_key="tp",
+                device_mesh=self.device_mesh,
+            )
 
-            if self.device_mesh["tp"].get_local_rank() == 0:
-                await self.inference_engine.flush_cache()
-
-        else:
-            # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
-            # named_tensors = [(k, v) for k, v in params.items()]
-            named_tensors = params
-            load_format = None
-
-            for tensor_index, (name, tensor) in enumerate(named_tensors):
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.update_weights_from_tensor_legacy(
-                        named_tensors=[
-                            (
-                                name,
-                                tensor.detach(),
-                            )
-                        ],
-                        load_format=load_format,
-                        flush_cache=False,
-                    )
-
-                if self.device_mesh["tp"].get_local_rank() == 0:
-                    await self.inference_engine.flush_cache()
+        if self.device_mesh["tp"].get_local_rank() == 0:
+            await self.inference_engine.flush_cache()
 
     async def release_memory(self):
         if self.device_mesh["tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
@@ -335,7 +312,6 @@ class MegatronSGLangAsyncShardingManager(MegatronSGLangShardingManager):
         Uses the original simple approach that works for first step
         """
         named_tensors = params
-        load_format = None
 
         # For NCCL sync mode, we need to process parameters bucket by bucket
         # to prevent GPU OOM: NCCL sync -> sglang-load (sgl_update_weights)
@@ -408,7 +384,7 @@ class MegatronSGLangAsyncShardingManager(MegatronSGLangShardingManager):
         # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
         # named_tensors = [(k, v) for k, v in params.items()]
         named_tensors = params
-        load_format = None
+        load_format = None  # Unused variable
 
         if use_reqinput:
             for obj in params:

@@ -654,7 +654,7 @@ class SGLangRollout(BaseRollout):
 
     def update_weight_from_dual_buffer(self):
         func_call = self.sharding_manager.update_weights
-        update_success = self._engine.execute_update_weights_before_generate(func_call)
+        self._engine.execute_update_weights_before_generate(func_call)
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
@@ -697,10 +697,8 @@ class SGLangRollout(BaseRollout):
             # print("[SGLangRollout] No param_update started, skipping wait")
             return
 
-        start_time = self.param_update_manager._param_update_start_time
         if hasattr(self, "_engine") and self._engine is not None:
             self._engine.wait_for_buffer_write()
-            remaining = timeout_seconds - (time.time() - start_time)
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()

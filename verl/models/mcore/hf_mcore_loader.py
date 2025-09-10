@@ -1,3 +1,17 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import os
 import re
@@ -125,7 +139,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
                 layer = "lm_head"
                 layer_to_params[layer].add(k)
             else:
-                assert False, k
+                raise AssertionError(k)
 
         self.hf_architecture = self.model_config.architectures[0]
         self.untie_embeddings_and_output_weights = not self.model_config.tie_word_embeddings
@@ -163,7 +177,8 @@ class DeepseekV2HfLoader(HfMcoreManager):
 
     def adjust_mapping_table(self):
         if self._multi_latent_attention:
-            # 在不使用mla时，目前的input_layernorm.weight 被映射为linear_qkv.layer_norm_weight。使用mla时该名字无需转换。
+            # 在不使用mla时，目前的input_layernorm.weight 被映射为linear_qkv.layer_norm_weight。
+            # 使用mla时该名字无需转换。
             if "input_layernorm.weight" in self.REPLACE_DICT:
                 self.REPLACE_DICT.pop("input_layernorm.weight")
             # 添加mla norm的映射
@@ -257,7 +272,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         if vocab_size >= self._padded_vocab_size:
             embedding = embedding[: self._padded_vocab_size, :]
         else:
-            assert False, f"ckpt.vocab_size={vocab_size}, padded_vocab_size={self._padded_vocab_size}"
+            raise AssertionError(f"ckpt.vocab_size={vocab_size}, padded_vocab_size={self._padded_vocab_size}")
         tensors[hf_name] = embedding
         return tensors
 

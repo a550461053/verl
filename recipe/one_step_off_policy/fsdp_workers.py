@@ -239,12 +239,16 @@ class RolloutWorker(ActorRolloutRefWorker):
         assert self._is_rollout
 
         meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id
-            if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id
-            if self.generation_config is not None
-            else self.tokenizer.pad_token_id,
+            "eos_token_id": (
+                self.generation_config.eos_token_id
+                if self.generation_config is not None
+                else self.tokenizer.eos_token_id
+            ),
+            "pad_token_id": (
+                self.generation_config.pad_token_id
+                if self.generation_config is not None
+                else self.tokenizer.pad_token_id
+            ),
         }
         prompts.meta_info.update(meta_info)
         timing_generate = {}

@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from megatron.core.transformer.transformer_block import *
+
 WrappedTensor = None
 BaseInferenceContext = None
-from megatron.core.transformer.transformer_block import *
 
 
 class Qwen2_5VisionTransformerBlock(TransformerBlock):

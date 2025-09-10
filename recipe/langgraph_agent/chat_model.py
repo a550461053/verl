@@ -173,9 +173,10 @@ class ChatModel(BaseChatModel):
             tuple[str, list[int], list[int]]: Request id, prompt ids, response mask.
         """
         # messages: [system], human, ai, human|tool, ai, human|tool, ...
-        assert messages[-1].type in ["human", "tool"], (
-            f"Last message must be human or tool, but got {messages[-1].type}"
-        )
+        assert messages[-1].type in [
+            "human",
+            "tool",
+        ], f"Last message must be human or tool, but got {messages[-1].type}"
         loop = asyncio.get_running_loop()
 
         # Case 1: initial chat completion: [system], human

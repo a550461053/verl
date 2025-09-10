@@ -124,12 +124,16 @@ class RolloutWorker(Worker):
     def generate_sequences(self, prompts: DataProto):
         """Given a batch of prompts, return a batch of responses. Internally, it can use"""
         meta_info = {
-            "eos_token_id": self.model_config.generation_config.eos_token_id
-            if self.model_config.generation_config is not None
-            else self.model_config.tokenizer.eos_token_id,
-            "pad_token_id": self.model_config.generation_config.pad_token_id
-            if self.model_config.generation_config is not None
-            else self.model_config.tokenizer.pad_token_id,
+            "eos_token_id": (
+                self.model_config.generation_config.eos_token_id
+                if self.model_config.generation_config is not None
+                else self.model_config.tokenizer.eos_token_id
+            ),
+            "pad_token_id": (
+                self.model_config.generation_config.pad_token_id
+                if self.model_config.generation_config is not None
+                else self.model_config.tokenizer.pad_token_id
+            ),
         }
         prompts.meta_info.update(meta_info)
 

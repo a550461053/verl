@@ -20,6 +20,7 @@ import pandas as pd
 import ray
 from torch.utils.data import Dataset
 
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.dataset.rl_dataset import RLHFDataset as OriginalRLHFDataset
 
@@ -247,7 +248,8 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
         if not issubclass(dataset_cls, Dataset):
             raise TypeError(
-                f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+                f"The custom dataset class '{data_config.custom_cls.name}' from "
+                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
             )
     else:
         dataset_cls = RLHFDataset

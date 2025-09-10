@@ -1,3 +1,17 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import atexit
 import concurrent.futures
@@ -255,7 +269,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
         t3 = time.time()
         print(
-            f"===== finished async_pipline:{self.async_pipline_init} initializing workers in {t3 - t2:.2f},{t2 - t1:.2f} seconds =====",
+            f"===== finished async_pipline:{self.async_pipline_init} initializing workers in "
+            f"{t3 - t2:.2f},{t2 - t1:.2f} seconds =====",
             flush=True,
         )
 
@@ -326,8 +341,6 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             self.epoch = epoch
             for batch_dict in self.train_dataloader:
-                metrics = {}
-                timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # pop those keys for generation
@@ -342,7 +355,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
         dataloader_batch_iter = self.get_next_batch()
         pipeline_start = await self._async_pipeline.pull(src_role="train", dst_role="dataloader")
         print(
-            f"[dataloader] loop started with pipeline_start: {pipeline_start}, {pipeline_start == PIPELINE_START_SINGLE}"
+            f"[dataloader] loop started with pipeline_start: {pipeline_start}, "
+            f"{pipeline_start == PIPELINE_START_SINGLE}"
         )
         max_pending_size = 2
         while True:
@@ -369,7 +383,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
                 next_queue = self._async_pipeline.get_cur_queue(src_role="train", dst_role="rollout")
                 print(
-                    f"[dataloader] Pushed step:{cur_global_steps}, gs:{self.global_steps} batch to train queue. Next queue size: {next_queue.qsize()}"
+                    f"[dataloader] Pushed step:{cur_global_steps}, gs:{self.global_steps} batch to train queue. "
+                    f"Next queue size: {next_queue.qsize()}"
                 )
 
     async def rollout_generate(self):
@@ -384,7 +399,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
             if cur_model_queue.qsize() > 0:
                 cur_model_step = await self._async_pipeline.pull(src_role="param_update", dst_role="rollout")
                 print(
-                    f"[rollout] Current model step: {cur_model_step}, global steps: {self.global_steps}, generate_global_step:{self.generate_global_step}"
+                    f"[rollout] Current model step: {cur_model_step}, global steps: {self.global_steps}, "
+                    f"generate_global_step:{self.generate_global_step}"
                 )
 
             cur_queue = self._async_pipeline.get_cur_queue(src_role="train", dst_role="rollout")
@@ -411,7 +427,6 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
             # rollout
             if mock_data:
-                # # rollout_data = self.rollout_wg.generate_sequences(train_data)
                 rollout_data = {
                     "responses": torch.randint(0, 2, (8, 10)),  # mock generated responses
                     "prompts": train_data["input_ids"],  # use training data input as prompts
@@ -419,15 +434,6 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                 }
 
             else:
-                # with concurrent.futures.ThreadPoolExecutor() as executor:
-                #     # Use the executor to run the rollout generation in a separate thread
-                #     # future = executor.submit(self.rollout_wg.generate_sequences, gen_batch)
-                #     # gen_batch_output = future.result()
-                #     coro = self.rollout_wg.async_generate_sequences(self.train_to_rollout_queue, self.rollout_to_train_queue)
-                #     future = executor.submit(asyncio.run, coro)
-                #     # No need to Wait for the future to complete and get the result
-                #     # result = future.result()
-
                 rollout_data = self.rollout_wg.generate_sequences(train_data)
 
             print(f"[Rollout] Step {step + 1}: Sending rollout data to train queue")
@@ -616,7 +622,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                             await self._async_pipeline.push("train", "reward", batch)
 
                             # TODO: lazy load reward_fn
-                            # reward_tensor, reward_extra_infos_dict = await self._async_pipeline.pull(src_role="reward", dst_role="train")
+                            # reward_tensor, reward_extra_infos_dict = await self._async_pipeline.pull(
+                            #     src_role="reward", dst_role="train")
 
                         else:
                             # compute reward model score
@@ -782,7 +789,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
                             )
 
                     # # validate
-                    # if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    # if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (
+                    #     is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     #     with marked_timer("testing", timing_raw):
                     #         val_metrics: dict = self._validate()
                     #         if is_last_step:
@@ -845,7 +853,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
     async def fit_async(self):
         """
-        async execute rollout and train, simple but easy to confuse with overlap logic, deprecated (switch to state machine task-loop)
+        async execute rollout and train, simple but easy to confuse with overlap logic,
+        deprecated (switch to state machine task-loop)
         """
         await asyncio.gather(
             # 1. dataloader_loop
@@ -870,7 +879,8 @@ class RayPPOAsyncPipelineTrainer(RayPPOTrainer):
 
         Args:
             use_blocking_mode: whether to use blocking mode (default False)
-                              True: use sync mode, use nccl for sync (because of thread safety, cannot do async parameter sync, so deprecated)
+                              True: use sync mode, use nccl for sync
+                              (because of thread safety, cannot do async parameter sync, so deprecated)
                               False: use pure async mode, use cpu for async parameter sync
         """
         mode_name = "blocking" if use_blocking_mode else "async"

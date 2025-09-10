@@ -1,3 +1,17 @@
+# Copyright 2025 hilab team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import gc
 import os
@@ -63,7 +77,8 @@ class ParamUpdateManager:
         enhanced_print(
             "ParamUpdateManager",
             None,
-            f"Bucket sizes: send={self.send_bucket_size_mb}MB, sync_mode={'CPU_async' if enable_param_async else 'NCCL_GPU_sync'}",
+            f"Bucket sizes: send={self.send_bucket_size_mb}MB, "
+            f"sync_mode={'CPU_async' if enable_param_async else 'NCCL_GPU_sync'}",
         )
 
         # Initialize parameter metadata and groups
@@ -341,7 +356,8 @@ class ParamUpdateManager:
         enhanced_print(
             "param_update",
             None,
-            f"All {total_buckets} buckets processed in {total_bucket_time:.4f}s (avg: {total_bucket_time / total_buckets:.4f}s per bucket)",
+            f"All {total_buckets} buckets processed in {total_bucket_time:.4f}s "
+            f"(avg: {total_bucket_time / total_buckets:.4f}s per bucket)",
         )
 
         end_time = time.time()
@@ -452,7 +468,8 @@ class ParamUpdateManager:
                 enhanced_print(
                     "param_update",
                     None,
-                    f"  Bucket {bucket_name} memory: {memory_before:.2f}GB -> {memory_after:.2f}GB (delta: +{memory_delta:.2f}GB)",
+                    f"  Bucket {bucket_name} memory: {memory_before:.2f}GB -> "
+                    f"{memory_after:.2f}GB (delta: +{memory_delta:.2f}GB)",
                 )
 
             # Check if we found all needed tensors
@@ -1051,10 +1068,6 @@ class ParamUpdateManager:
             group_tensor_count += len(group)
             group_sizes.append(total_size)
 
-        if group_sizes:
-            avg_size = sum(group_sizes) / len(group_sizes)
-            # enhanced_print("param_update", None, f"Simplified grouping created {len(groups)} groups with Average group size: {avg_size/1024/1024:.1f}MB")
-
         return groups, group_tensor_count
 
     def _calculate_tensor_size(self, meta):
@@ -1089,7 +1102,8 @@ class ParamUpdateManager:
             enhanced_print(
                 "param_update",
                 None,
-                f"Async recv: Ray get {len(received_tensors)} tensors completed for {bucket_name} (version {version}) in {get_time:.3f}s",
+                f"Async recv: Ray get {len(received_tensors)} tensors completed "
+                f"for {bucket_name} (version {version}) in {get_time:.3f}s",
             )
 
         named_tensors = received_tensors
@@ -1184,7 +1198,8 @@ class ParamUpdateManager:
         enhanced_print(
             "param_update",
             None,
-            f"Async send: completed {success_count}/{len(groups)} buckets, cost time:{t2 - t1:.2f}, worker thread ending",
+            f"Async send: completed {success_count}/{len(groups)} buckets, "
+            f"cost time:{t2 - t1:.2f}, worker thread ending",
         )
 
     @torch.no_grad()
@@ -1232,7 +1247,9 @@ class ParamUpdateManager:
                     enhanced_print(
                         "param_update",
                         None,
-                        f"Async recv: got queue_data for {queue_data.get('bucket_name') if queue_data else 'None'}, expecting {bucket_name}",
+                        f"Async recv: got queue_data for "
+                        f"{queue_data.get('bucket_name') if queue_data else 'None'}, "
+                        f"expecting {bucket_name}",
                     )
 
                 # Verify bucket_name order consistency
@@ -1240,8 +1257,10 @@ class ParamUpdateManager:
                 actual_bucket_name = queue_data.get("bucket_name") if queue_data else None
 
                 if actual_bucket_name != expected_bucket_name:
-                    assert False, (
-                        f"ERROR: i:{i}, thread id: {thread_id}, rank:{self.rank}, engine_idx:{self.engine_idx()} Bucket order mismatch! Expected {expected_bucket_name}, got {actual_bucket_name}, exit"
+                    raise AssertionError(
+                        f"ERROR: i:{i}, thread id: {thread_id}, rank:{self.rank}, "
+                        f"engine_idx:{self.engine_idx()} Bucket order mismatch! "
+                        f"Expected {expected_bucket_name}, got {actual_bucket_name}, exit"
                     )
 
                 bucket_name = actual_bucket_name
@@ -1254,7 +1273,10 @@ class ParamUpdateManager:
                     enhanced_print(
                         "param_update",
                         None,
-                        f"i:{i}, thread id: {thread_id}, rank:{self.rank}, engine_idx:{self.engine_idx()}, Async recv: got {len(store_ref)} object_refs for {bucket_name} (version {version})",
+                        f"i:{i}, thread id: {thread_id}, rank:{self.rank}, "
+                        f"engine_idx:{self.engine_idx()}, Async recv: got "
+                        f"{len(store_ref)} object_refs for {bucket_name} "
+                        f"(version {version})",
                     )
 
             # Use _async_recv_bucket_with_store_ref to receive data
@@ -1264,7 +1286,8 @@ class ParamUpdateManager:
 
             if received_tensors:
                 success_count += 1
-                # enhanced_print("param_update", None, f"i:{i}, rank:{self.rank} Async recv: completed {bucket_name} (version {version})")
+                # enhanced_print("param_update", None, f"i:{i}, rank:{self.rank} "
+                # f"Async recv: completed {bucket_name} (version {version})")
             else:
                 enhanced_print(
                     "param_update",
@@ -1278,7 +1301,8 @@ class ParamUpdateManager:
         enhanced_print(
             "param_update",
             None,
-            f"Async recv: completed {success_count}/{len(groups)} buckets(version:{version}), cost time:{t2 - t1:.2f}, worker thread ending",
+            f"Async recv: completed {success_count}/{len(groups)} "
+            f"buckets(version:{version}), cost time:{t2 - t1:.2f}, worker thread ending",
         )
 
     def _async_send_bucket(self, bucket_tensors, ray_rank, bucket_name, version=None):

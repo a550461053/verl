@@ -374,9 +374,7 @@ class TestGsm8kInteraction:
         # Setup instance
         await self.interaction.start_interaction(instance_id=instance_id, ground_truth=ground_truth)
 
-        messages = [
-            {"role": "assistant"}  # Missing content field
-        ]
+        messages = [{"role": "assistant"}]  # Missing content field
 
         with patch("verl.utils.reward_score.gsm8k.compute_score", return_value=0.0):
             should_terminate, response, reward, metadata = await self.interaction.generate_response(

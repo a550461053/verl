@@ -397,15 +397,15 @@ class FSDPModelMerger(BaseModelMerger):
         for key in hf_model_keys:
             hf_shape = hf_state_dict[key].shape
             collected_shape = state_dict[key].shape
-            assert hf_shape == collected_shape, (
-                f"Shape mismatch for key '{key}': original {hf_shape} vs collected {collected_shape}"
-            )
+            assert (
+                hf_shape == collected_shape
+            ), f"Shape mismatch for key '{key}': original {hf_shape} vs collected {collected_shape}"
 
             hf_dtype = hf_state_dict[key].dtype
             collected_dtype = state_dict[key].dtype
-            assert hf_dtype == collected_dtype, (
-                f"Dtype mismatch for key '{key}': original {hf_dtype} vs collected {collected_dtype}"
-            )
+            assert (
+                hf_dtype == collected_dtype
+            ), f"Dtype mismatch for key '{key}': original {hf_dtype} vs collected {collected_dtype}"
 
             torch.testing.assert_close(hf_state_dict[key], state_dict[key], atol=1e-6, rtol=1e-6)
 
