@@ -302,9 +302,44 @@ class ParamUpdateManager:
         end_time = time.time()
         enhanced_print("param_update", None, f"GPU sync parameter update completed in {end_time - start_time:.2f} seconds")
         
+        # Final memory cleanup to prevent OOM in subsequent operations
+        import torch
+        enhanced_print("param_update", None, f"Starting final memory cleanup...")
+        
+        if torch.cuda.is_available():
+            # Get memory info before cleanup
+            memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
+            enhanced_print("param_update", None, f"  Memory before cleanup: {memory_before:.2f} GB")
+
+            # Multiple rounds of cleanup per iteration
+            self._force_memory_cleanup(rounds=1)
+    
+            # Final memory info
+            memory_after = torch.cuda.memory_allocated() / 1024**3  # GB
+            memory_freed_total = memory_before - memory_after
+            enhanced_print("param_update", None, f"  Final memory: {memory_after:.2f} GB (total freed: {memory_freed_total:.2f} GB)")
+        
         # Set completion flag to True at the end
         self._param_update_completed = True
         return True
+
+    def _force_memory_cleanup(self, rounds=1, verbose=False):
+        """Force memory cleanup with multiple rounds"""
+        import gc
+        import torch
+        
+        for round_num in range(rounds):
+            gc.collect()
+            
+            if torch.cuda.is_available():
+                # CUDA cleanup
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.ipc_collect()
+                
+                if verbose:
+                    memory_current = torch.cuda.memory_allocated() / 1024**3  # GB
+                    enhanced_print("param_update", None, f"  Cleanup round {round_num+1}/{rounds}: {memory_current:.2f} GB")
 
     def _sync_broadcast_bucket(self, per_tensor_param, group, bucket_name, func_call, clear_cache=False):
         """All ranks participate in broadcast - optimized with tensor concatenation"""
@@ -313,10 +348,7 @@ class ParamUpdateManager:
         def local_clear_cache():
             if not clear_cache:
                 return 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Wait for all operations to complete
+            self._force_memory_cleanup(rounds=1)
 
         if self.is_train_node():
             # All train nodes: collect and concatenate tensors
@@ -481,7 +513,7 @@ class ParamUpdateManager:
             for name, tensor in received_tensors:
                 del tensor
             del received_tensors
-            
+
             # Force garbage collection but don't clear cache during NCCL communication
             local_clear_cache()
 
@@ -543,7 +575,7 @@ class ParamUpdateManager:
             if func_call and received_tensors:
                 func_call(received_tensors, version=0, group_tensor_count=len(received_tensors))
                 enhanced_print("param_update", None, f"Loaded weights for {bucket_name}")
-            
+
             return True
             
         except Exception as e:
