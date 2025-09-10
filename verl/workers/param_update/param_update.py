@@ -290,7 +290,8 @@ class ParamUpdateManager:
             enhanced_print("param_update", None, f"Processing {bucket_name} ({bucket_idx+1}/{total_buckets}) - {len(group)} tensors")
 
             # All ranks participate in broadcast
-            self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call)
+            clear_cache = bucket_idx == total_buckets - 1
+            self._sync_broadcast_bucket(per_tensor_param, group, bucket_name, func_call, clear_cache=clear_cache)
             
             bucket_iter_time = time.time() - bucket_iter_start
             enhanced_print("param_update", None, f"Bucket {bucket_name} completed in {bucket_iter_time:.4f}s")
@@ -330,9 +331,6 @@ class ParamUpdateManager:
             # Collect only needed tensors from cache
             tensor_count = 0
 
-            # Train nodes: cache only current bucket's tensors
-            bucket_tensors = {}
-            
             # Monitor memory before bucket caching
             if torch.cuda.is_available():
                 memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
@@ -340,7 +338,6 @@ class ParamUpdateManager:
             # Iterate through generator to find tensors for current bucket only
             for param_name, tensor in per_tensor_param:
                 if param_name in needed_names:
-                    bucket_tensors[param_name] = tensor
                     tensor_count += 1
                     
                     # Ensure tensor is on GPU
@@ -368,10 +365,7 @@ class ParamUpdateManager:
                 memory_after = torch.cuda.memory_allocated() / 1024**3  # GB
                 memory_delta = memory_after - memory_before
                 enhanced_print("param_update", None, f"  Bucket {bucket_name} memory: {memory_before:.2f}GB -> {memory_after:.2f}GB (delta: +{memory_delta:.2f}GB)")
-            
-            # Clear bucket cache to free memory immediately
-            del bucket_tensors
-        
+
             # Check if we found all needed tensors
             found_names = set(tensor_names)
             missing_names = needed_names - found_names
@@ -390,10 +384,7 @@ class ParamUpdateManager:
                     concatenated_tensor = torch.cat(tensors, dim=0)
                 else:
                     # Different dtypes detected - convert to common dtype
-                    enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, keeping original dtypes")
                     first_dtype = tensors[0].dtype
-                    enhanced_print("param_update", None, f"Using {first_dtype} as common dtype for concatenation")
-                    
                     converted_tensors = []
                     for i, t in enumerate(tensors):
                         if t.dtype != first_dtype:
@@ -437,13 +428,10 @@ class ParamUpdateManager:
                     shape = meta["shape"]
                     total_size += torch.prod(torch.tensor(shape)).item()
                 
-                if len(unique_dtypes) == 1:
-                    first_dtype = group[0]["dtype"]
-                    concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
-                else:
-                    first_dtype = group[0]["dtype"]
+                first_dtype = group[0]["dtype"]
+                concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
+                if len(unique_dtypes) != 1:
                     enhanced_print("param_update", None, f"Warning: mixed dtypes {unique_dtypes} in {bucket_name}, using {first_dtype}")
-                    concatenated_tensor = torch.zeros(total_size, dtype=first_dtype, device="cuda")
 
                 # Receive the concatenated tensor
                 broadcast(concatenated_tensor, src_rank=0, group_name=getattr(self, 'train_generate_sync_group', self.ray_col_name))

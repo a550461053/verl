@@ -525,7 +525,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 transformer_config=self.tf_config,
                 layer_name_mapping=layer_name_mapping,
                 convert_qkv_gate_up_by_simple_split=True,
-                param_update_preduce_bucket_size_mb=self.config.actor.get("param_update_preduce_bucket_size_mb", 512),
+                param_update_preduce_bucket_size_mb=self.config.rollout.get("param_update_preduce_bucket_size_mb", 512),
                 enable_param_async=self.config.rollout.get("enable_param_async", False),
             )
             
