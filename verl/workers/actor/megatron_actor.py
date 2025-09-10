@@ -49,7 +49,6 @@ from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import broadcast_dict_tensor
 from verl.workers.actor import BasePPOActor
 
-
 __all__ = ["MegatronPPOActor"]
 
 logger = logging.getLogger(__file__)
@@ -187,6 +186,7 @@ class MegatronPPOActor(BasePPOActor):
             DataProto: torch.Tensor: the log_prob tensor
         """
         import torch._dynamo
+
         torch._dynamo.config.suppress_errors = True
 
         data.to(get_device_id())
@@ -544,7 +544,15 @@ class MegatronPPOActor(BasePPOActor):
 
             forward_fn = get_mcore_forward_fn(self.hf_config)
 
-            output = forward_fn(model, input_ids, attention_mask, position_ids, sequence_parallel=self.tf_config.sequence_parallel, logits_processor=logits_processor, logits_processor_args=logits_processor_args)
+            output = forward_fn(
+                model,
+                input_ids,
+                attention_mask,
+                position_ids,
+                sequence_parallel=self.tf_config.sequence_parallel,
+                logits_processor=logits_processor,
+                logits_processor_args=logits_processor_args,
+            )
 
             if forward_only:
                 meta_info = None

@@ -18,7 +18,6 @@ This file contains a Megatron style Hybrid Engine that shares the weights of the
 import inspect
 import logging
 import os
-import time
 
 import torch
 import torch.distributed

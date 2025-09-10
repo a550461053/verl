@@ -477,7 +477,8 @@ class McoreToHFWeightConverterQwen3Moe(McoreToHFWeightConverterDense):
         else:
             raise NotImplementedError(f"Unsupported parameter name: {name}")
         return convert_names, params
-    
+
+
 class McoreToHFWeightConverterXdgMoE(McoreToHFWeightConverterBase):
     def _convert_attention_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
         # 'decoder.layers.0.self_attention.linear_proj.weight'
@@ -511,7 +512,7 @@ class McoreToHFWeightConverterXdgMoE(McoreToHFWeightConverterBase):
         else:
             raise NotImplementedError(f"Unsupported parameter name: {name}")
         return convert_names, params
-    
+
     def _convert_mlp_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
         # mcore dense
         # 'decoder.layers.0.mlp.linear_fc1.layer_norm_weight'
@@ -550,7 +551,10 @@ class McoreToHFWeightConverterXdgMoE(McoreToHFWeightConverterBase):
             "mlp.linear_fc2.weight": "mlp.down_proj.weight",
             "mlp.shared_experts.linear_fc2.weight": "mlp.shared_experts.down_proj.weight",
             "mlp.linear_fc1.weight": ["mlp.gate_proj.weight", "mlp.up_proj.weight"],
-            "mlp.shared_experts.linear_fc1.weight": ["mlp.shared_experts.gate_proj.weight", "mlp.shared_experts.up_proj.weight"],
+            "mlp.shared_experts.linear_fc1.weight": [
+                "mlp.shared_experts.gate_proj.weight",
+                "mlp.shared_experts.up_proj.weight",
+            ],
             "pre_mlp_layernorm.weight": "post_attention_layernorm.weight",
             "mlp.router.weight": "mlp.gate.weight",
             "mlp.router.e_score_correction_bias": "mlp.gate.e_score_correction_bias",
@@ -581,7 +585,7 @@ class McoreToHFWeightConverterXdgMoE(McoreToHFWeightConverterBase):
                 raise NotImplementedError(f"Unsupported parameter name: {name}")
 
         return convert_names, params
-    
+
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
         direct_name_mapping = {
             "embedding.word_embeddings.weight": "model.embed_tokens.weight",

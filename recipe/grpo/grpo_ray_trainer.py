@@ -15,14 +15,13 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-import ray
-import time
+
 import uuid
-from collections import defaultdict
 from copy import deepcopy
 from pprint import pprint
 
 import numpy as np
+import ray
 import torch
 from tqdm import tqdm
 
@@ -34,7 +33,14 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
     reduce_metrics,
 )
-from verl.trainer.ppo.ray_trainer import AdvantageEstimator, RayPPOTrainer, _timer, apply_kl_penalty, compute_advantage, compute_response_mask
+from verl.trainer.ppo.ray_trainer import (
+    AdvantageEstimator,
+    RayPPOTrainer,
+    _timer,
+    apply_kl_penalty,
+    compute_advantage,
+    compute_response_mask,
+)
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 
 
@@ -127,7 +133,9 @@ class RayGRPOTrainer(RayPPOTrainer):
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+                    batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    )
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
@@ -161,7 +169,9 @@ class RayGRPOTrainer(RayPPOTrainer):
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                        entropy_loss = agg_loss(
+                            loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                        )
                         old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
@@ -216,21 +226,39 @@ class RayGRPOTrainer(RayPPOTrainer):
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                            metrics.update({
-                                **{f"critic/rewards/{k}/mean": np.mean(v) for k, v in reward_extra_infos_dict.items() if '_sub' in k},
-                                **{f"critic/rewards/{k}/max": np.max(v) for k, v in reward_extra_infos_dict.items() if '_sub' in k},
-                                **{f"critic/rewards/{k}/min": np.min(v) for k, v in reward_extra_infos_dict.items() if '_sub' in k},
-                            })
+                            metrics.update(
+                                {
+                                    **{
+                                        f"critic/rewards/{k}/mean": np.mean(v)
+                                        for k, v in reward_extra_infos_dict.items()
+                                        if "_sub" in k
+                                    },
+                                    **{
+                                        f"critic/rewards/{k}/max": np.max(v)
+                                        for k, v in reward_extra_infos_dict.items()
+                                        if "_sub" in k
+                                    },
+                                    **{
+                                        f"critic/rewards/{k}/min": np.min(v)
+                                        for k, v in reward_extra_infos_dict.items()
+                                        if "_sub" in k
+                                    },
+                                }
+                            )
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
+                            batch, kl_metrics = apply_kl_penalty(
+                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                            )
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
 
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
+                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                            "norm_adv_by_std_in_grpo", True
+                        )  # GRPO adv normalization factor
 
                         batch = compute_advantage(
                             batch,
@@ -278,14 +306,20 @@ class RayGRPOTrainer(RayPPOTrainer):
                             )
 
                     # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    if (
+                        self.val_reward_fn is not None
+                        and self.config.trainer.test_freq > 0
+                        and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                    ):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 

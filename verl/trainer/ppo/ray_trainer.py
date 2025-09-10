@@ -368,7 +368,7 @@ class RayPPOTrainer:
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
-        if hasattr(config.critic, 'enable') and config.critic.enable is not None:
+        if hasattr(config.critic, "enable") and config.critic.enable is not None:
             self.use_critic = bool(config.critic.enable)
         elif self.config.algorithm.adv_estimator == AdvantageEstimator.GAE:
             self.use_critic = True
@@ -832,7 +832,10 @@ class RayPPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if hasattr(self.config, 'global_profiler') and OmegaConf.select(self.config.global_profiler, "steps") is not None:
+        if (
+            hasattr(self.config, "global_profiler")
+            and OmegaConf.select(self.config.global_profiler, "steps") is not None
+        ):
             wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
             assert (
                 OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
@@ -869,7 +872,7 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
 
-        print(f"===== finished init workers =====", flush=True)
+        print("===== finished init workers =====", flush=True)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -979,15 +982,13 @@ class RayPPOTrainer:
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
         # load actor
-        if hasattr(self, 'async_pipline_init') and self.async_pipline_init:
+        if hasattr(self, "async_pipline_init") and self.async_pipline_init:
             self.actor_wg.load_checkpoint(
                 actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
-            if hasattr(self, 'sperated_ref_model') and self.sperated_ref_model:
+            if hasattr(self, "sperated_ref_model") and self.sperated_ref_model:
                 ref_policy_path = self.config.actor_rollout_ref.model.path
-                self.ref_policy_wg.load_checkpoint(
-                    ref_policy_path, del_local_after_load=False
-                )
+                self.ref_policy_wg.load_checkpoint(ref_policy_path, del_local_after_load=False)
         else:
             self.actor_rollout_wg.load_checkpoint(
                 actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
@@ -1072,7 +1073,7 @@ class RayPPOTrainer:
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            print(f"===== validation before training =====", flush=True)
+            print("===== validation before training =====", flush=True)
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")

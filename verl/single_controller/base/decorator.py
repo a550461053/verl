@@ -131,8 +131,10 @@ def dispatch_all_to_all(worker_group, *args, **kwargs):
 def collect_all_to_all(worker_group, output):
     return output
 
+
 def collect_all_to_one(worker_group, output):
     return output[0]
+
 
 def _concat_data_proto_or_future(output: list):
     import ray
@@ -194,6 +196,7 @@ def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(worker_group.world_size, *args[1:], **kwargs)
     splitted_args_with_func = [[args[0]] * worker_group.world_size] + splitted_args
     return splitted_args_with_func, splitted_kwargs
+
 
 def collect_dp_compute_data_proto(worker_group, output):
     import ray

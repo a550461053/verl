@@ -15,7 +15,6 @@ import inspect
 import logging
 import socket
 from copy import deepcopy
-import os
 from typing import Any, Optional
 
 import ray
@@ -572,7 +571,9 @@ class RayWorkerGroup(WorkerGroup):
                 remote_call = getattr(worker, cand)
                 return remote_call.remote(*args, **kwargs)
         # No matching method found; raise explicit error
-        raise AttributeError(f"ActorHandle has no method '{method_name}' or any of {[p+'_'+method_name for p in ('rollout','actor','critic','reward')]}.")
+        raise AttributeError(
+            f"ActorHandle has no method '{method_name}' or any of {[p + '_' + method_name for p in ('rollout', 'actor', 'critic', 'reward')]}."
+        )
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
         """Execute a method on rank zero worker synchronously.

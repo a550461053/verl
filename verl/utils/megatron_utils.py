@@ -19,11 +19,11 @@
 import gc
 import inspect
 import os
+import socket
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict
-import socket
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -43,37 +43,35 @@ from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
 from verl.utils.torch_dtypes import PrecisionType
 
-
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 
 
 def start_record_memory_history() -> None:
-   if not torch.cuda.is_available():
-       print("CUDA unavailable. Not recording memory history")
-       return
+    if not torch.cuda.is_available():
+        print("CUDA unavailable. Not recording memory history")
+        return
 
-   print("Starting snapshot record_memory_history")
-   torch.cuda.memory._record_memory_history(
-       max_entries=100000
-   )
+    print("Starting snapshot record_memory_history")
+    torch.cuda.memory._record_memory_history(max_entries=100000)
+
 
 def stop_record_memory_history() -> None:
-   if not torch.cuda.is_available():
-       print("CUDA unavailable. Not recording memory history")
-       return
-    
+    if not torch.cuda.is_available():
+        print("CUDA unavailable. Not recording memory history")
+        return
+
     # Prefix for file names.
-   host_name = socket.gethostname()
-   timestamp = datetime.now().strftime(TIME_FORMAT_STR)
-   file_prefix = f"{host_name}_{timestamp}"
+    host_name = socket.gethostname()
+    timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+    file_prefix = f"{host_name}_{timestamp}"
 
-   try:
-       print(f"Saving snapshot to local file: {file_prefix}.pickle")
-       torch.cuda.memory._dump_snapshot(f"{file_prefix}.pickle")
-   except Exception as e:
-       print(f"Failed to capture memory snapshot {e}")
+    try:
+        print(f"Saving snapshot to local file: {file_prefix}.pickle")
+        torch.cuda.memory._dump_snapshot(f"{file_prefix}.pickle")
+    except Exception as e:
+        print(f"Failed to capture memory snapshot {e}")
 
-   torch.cuda.memory._record_memory_history(enabled=None)
+    torch.cuda.memory._record_memory_history(enabled=None)
 
 
 def get_model_config(model):
@@ -441,6 +439,7 @@ def offload_megatron_model_grad_to_cpu(models):
     gc.collect()
     get_torch_device().empty_cache()
 
+
 @torch.no_grad()
 def load_megatron_model_grad_to_gpu(models):
     for model_chunk in models:
@@ -458,6 +457,7 @@ def load_megatron_model_grad_to_gpu(models):
                     param.grad = param.grad.to(device_id, non_blocking=True)
     gc.collect()
     get_torch_device().empty_cache()
+
 
 @torch.no_grad()
 def offload_megatron_copy_params(optimizers):
@@ -909,7 +909,15 @@ def default_tp_concat_fn(
     return infer_params
 
 
-def per_tensor_generator(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True, target_device=None):
+def per_tensor_generator(
+    actor_module,
+    model_config,
+    weight_converter,
+    transformer_config,
+    layer_name_mapping,
+    convert_qkv_gate_up_by_simple_split=True,
+    target_device=None,
+):
     from megatron.core import parallel_state as mpu
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
@@ -925,7 +933,7 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
         target_device = torch.cuda.current_device()
     else:
         target_device = torch.device(target_device)
-    
+
     def to_device(tensor):
         if tensor is None:
             return None
@@ -1104,7 +1112,9 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
             # num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage
             # are not set, we will not enable uneven pipeline. All layers will be treated
             # as middle layers.
-            first_pipeline_num_layers = 0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers
+            first_pipeline_num_layers = (
+                0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers
+            )
             last_pipeline_num_layers = 0 if config.last_pipeline_num_layers is None else config.last_pipeline_num_layers
 
             middle_num_layers = config.num_layers - first_pipeline_num_layers - last_pipeline_num_layers
@@ -1116,9 +1126,13 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
                 # If the num_layers_in_first_pipeline_stage and
                 # num_layers_in_last_pipeline_stage are not set, all pipeline stages
                 # will be treated as middle pipeline stages in the calculation
-                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = 0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers // vp_size
+                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = (
+                    0 if config.first_pipeline_num_layers is None else config.first_pipeline_num_layers // vp_size
+                )
 
-                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = 0 if config.last_pipeline_num_layers is None else config.last_pipeline_num_layers // vp_size
+                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = (
+                    0 if config.last_pipeline_num_layers is None else config.last_pipeline_num_layers // vp_size
+                )
 
                 num_layers_per_vritual_model_chunk_in_middle_pipeline_stage = middle_num_layers // vp_size
 
@@ -1164,16 +1178,20 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
                 offset = vp_stage * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
 
                 # Reduce the offset of embedding layer from the total layer number
-                if hasattr(config, 'account_for_embedding_in_pipeline_split') and config.account_for_embedding_in_pipeline_split and not parallel_state.is_pipeline_first_stage(
-                    **extra_kwargs
+                if (
+                    hasattr(config, "account_for_embedding_in_pipeline_split")
+                    and config.account_for_embedding_in_pipeline_split
+                    and not parallel_state.is_pipeline_first_stage(**extra_kwargs)
                 ):
                     offset -= 1
             else:
                 offset = pipeline_rank * num_layers_per_pipeline_rank
 
                 # Reduce the offset of embedding layer from the total layer number
-                if hasattr(config, 'account_for_embedding_in_pipeline_split') and config.account_for_embedding_in_pipeline_split and not parallel_state.is_pipeline_first_stage(
-                    **extra_kwargs
+                if (
+                    hasattr(config, "account_for_embedding_in_pipeline_split")
+                    and config.account_for_embedding_in_pipeline_split
+                    and not parallel_state.is_pipeline_first_stage(**extra_kwargs)
                 ):
                     offset -= 1
     else:

@@ -483,7 +483,9 @@ def load_megatron_model_weights(
     return model.config
 
 
-def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/verl/rlhf"):
+def load_megatron_gptmodel_weights(
+    config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/verl/rlhf"
+):
     # """Load weights for mcore GPT model."""
     # _, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model, local_cache_path)
 
@@ -498,11 +500,12 @@ def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_
     # )
     # del state_dict, model
     from megatron.core import parallel_state
+
     from verl.models.mcore.hf_mcore_loader import DeepseekV2HfLoader
     from verl.utils.megatron_utils import unwrap_model
-    
+
     model_chunks = unwrap_model(parallel_model)
-    
+
     tp_rank = parallel_state.get_tensor_model_parallel_rank()
     tp_size = parallel_state.get_tensor_model_parallel_world_size()
     pp_rank = parallel_state.get_pipeline_model_parallel_rank()
@@ -515,16 +518,25 @@ def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_
     if vp_size is None:
         vp_size = 1
     pp_size_with_vp = vp_size * pp_size
-    
+
     for i in range(len(model_chunks)):
         pp_rank_with_vp = pp_size * i + pp_rank
-        loader = DeepseekV2HfLoader(config, model_config, tp_size=tp_size, tp_rank=tp_rank, pp_size=pp_size_with_vp, pp_rank=pp_rank_with_vp, ep_size=ep_size, ep_rank=ep_rank)
+        loader = DeepseekV2HfLoader(
+            config,
+            model_config,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            pp_size=pp_size_with_vp,
+            pp_rank=pp_rank_with_vp,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+        )
         state_dict = loader.load()
         missing_keys, unexpected_keys = model_chunks[i].load_state_dict(state_dict, strict=False)
-        assert all(
-        map(lambda x: '_extra_state' in x, missing_keys)), f'Only missing "_extra_state" or "rm_head" is accepted. But got {list(filter(lambda x: "_extra_state" not in x, missing_keys))}'
-        assert len(unexpected_keys) == 0, f'Unexpected keys is not accepted: {unexpected_keys}, {model_chunks[i]}'
-    
+        assert all(map(lambda x: "_extra_state" in x, missing_keys)), (
+            f'Only missing "_extra_state" or "rm_head" is accepted. But got {list(filter(lambda x: "_extra_state" not in x, missing_keys))}'
+        )
+        assert len(unexpected_keys) == 0, f"Unexpected keys is not accepted: {unexpected_keys}, {model_chunks[i]}"
 
 
 # pad input_ids_rmpad, cu_seqlens and max_seqlen_in_batch to be divisible by tp

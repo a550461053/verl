@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 from megatron.core import parallel_state
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
+
 try:
     from megatron.core.inference.contexts import BaseInferenceContext
 except Exception:

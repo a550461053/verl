@@ -191,7 +191,10 @@ class DeepseekV3Model(BaseModelInitializer):
         if self.tfconfig.mtp_num_layers is not None and self.tfconfig.mtp_num_layers > 0:
             transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
             from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
-            mtp_block_spec = get_gpt_mtp_block_spec(self.tfconfig, transformer_layer_spec, use_transformer_engine=True, vp_stage=vp_stage)
+
+            mtp_block_spec = get_gpt_mtp_block_spec(
+                self.tfconfig, transformer_layer_spec, use_transformer_engine=True, vp_stage=vp_stage
+            )
             kwargs["mtp_block_spec"] = mtp_block_spec
 
         model = super().initialize(**kwargs)
@@ -266,25 +269,28 @@ class Qwen25VLModel(BaseModelInitializer):
         )
         if post_process and value:
             from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+
             qwen25_vl_model.language_model.output_layer = LinearForLastLayer(
                 input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
             )
 
         return qwen25_vl_model
 
+
 class XdgMoEModel(BaseModelInitializer):
     """Initializer for XDG MoE models."""
 
     def get_transformer_layer_spec(self):
         from cybertron.models.deepseek_v2.layer_specs_deepseekv2 import get_gpt_layer_with_transformer_engine_spec
+
         transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             self.tfconfig.num_moe_experts,
             self.tfconfig.moe_grouped_gemm,
             qk_layernorm=self.tfconfig.qk_layernorm,
-            multi_latent_attention=self.tfconfig.multi_latent_attention
+            multi_latent_attention=self.tfconfig.multi_latent_attention,
         )
         return transformer_layer_spec
-    
+
     def initialize(
         self,
         pre_process: bool = True,
@@ -296,7 +302,7 @@ class XdgMoEModel(BaseModelInitializer):
         freeze_moe_router = extra_kwargs.get("freeze_moe_router", True)
         if freeze_moe_router:
             self.tfconfig.moe_router_load_balancing_type = "none"
-        
+
         transformer_layer_spec = self.get_transformer_layer_spec()
         model = GPTModel(
             config=self.tfconfig,
@@ -313,7 +319,9 @@ class XdgMoEModel(BaseModelInitializer):
         if post_process and value:
             from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
 
-            model.output_layer = LinearForLastLayer(input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig)
+            model.output_layer = LinearForLastLayer(
+                input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig
+            )
 
         if freeze_moe_router:
             for layer in model.decoder.layers:

@@ -1,16 +1,11 @@
 # from dill import pickle as dill_pickle
 import copyreg
-import logging
 import os
-from collections import OrderedDict
-from contextlib import contextmanager
-from copy import copy, deepcopy
 
 import dill
 import dill.settings
 import torch
 import torch.distributed
-
 
 
 class NoneReducer:
@@ -43,9 +38,9 @@ def get_children_layers(model: torch.nn.Module, name=""):
         output_names, output_children = [name], [model]
     else:
         output_names, output_children = [name], [model]
-        for n, c in zip(names, children):
+        for n, c in zip(names, children, strict=False):
             res_n, res_c = get_children_layers(c, n)
-            for ni, ci in zip(res_n, res_c):
+            for ni, ci in zip(res_n, res_c, strict=False):
                 full_name = f"{name}.{ni}" if name != "" else ni
                 output_names.append(full_name)
                 output_children.append(ci)
@@ -76,7 +71,6 @@ mbs_ids = {}
 def hook_fwd_bwd_to_module(model: torch.nn.Module, names=None, prefix="", is_hf=False):
     def name_fn(name, direction="forward", is_hf=False):
         def fn(module, input_features, output_features):
-
             flag = True
             node = torch._C._current_autograd_node()
             if flag and name is not None and name != "" and name != " ":
@@ -86,9 +80,7 @@ def hook_fwd_bwd_to_module(model: torch.nn.Module, names=None, prefix="", is_hf=
 
                 key = (name, direction)
                 mbs_ids.setdefault(key, 0)
-                print(
-                    f"{prefix}{name}-iter-mbs{mbs_ids[key]}-{direction}-input.pt"
-                )
+                print(f"{prefix}{name}-iter-mbs{mbs_ids[key]}-{direction}-input.pt")
                 torch.save(
                     input_features,
                     f"{prefix}{name}-iter-mbs{mbs_ids[key]}-{direction}-input.pt",
@@ -127,6 +119,4 @@ def hook_fwd_bwd_to_module(model: torch.nn.Module, names=None, prefix="", is_hf=
     for name in new_names:
         if name in modules.keys():
             modules[name].register_forward_hook(name_fn(name, is_hf=is_hf))
-            modules[name].register_full_backward_hook(
-                name_fn(name, "backward", is_hf=is_hf), prepend=True
-            )
+            modules[name].register_full_backward_hook(name_fn(name, "backward", is_hf=is_hf), prepend=True)

@@ -21,12 +21,11 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-import time
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.ray_async_pipeline_trainer import RayPPOAsyncPipelineTrainer
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
@@ -138,12 +137,14 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.trainer.get("async_pipeline", False):
-            self.role_worker_mapping.update({
-                Role.Actor: ray.remote(actor_rollout_cls),
-                Role.RefPolicy: ray.remote(actor_rollout_cls),
-                Role.Rollout: ray.remote(actor_rollout_cls),
-                # Role.Critic: ray.remote(CriticWorker),
-            })
+            self.role_worker_mapping.update(
+                {
+                    Role.Actor: ray.remote(actor_rollout_cls),
+                    Role.RefPolicy: ray.remote(actor_rollout_cls),
+                    Role.Rollout: ray.remote(actor_rollout_cls),
+                    # Role.Critic: ray.remote(CriticWorker),
+                }
+            )
         else:
             self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
 
@@ -184,22 +185,24 @@ class TaskRunner:
             # Calculate pool sizes based on task groups and node ratios
             # sperated_node_ratios: node ratios for each task group
             # sperated_node_tasks: task separation configuration
-            # Example: 
+            # Example:
             # sperated_node_tasks = [[logp, actor-train], ref_logp, generate]
             # sperated_node_ratios = [0.5, 0.25, 0.25]
             # means: first group (logp+actor-train) uses 50% nodes, ref_logp uses 25%, generate uses 25%
             sperated_node_ratios = config.trainer.sperated_node_ratios
             sperated_node_tasks = config.trainer.sperated_node_tasks
             total_ngpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
-            
+
             # Use utility function to calculate pool sizes
             from verl.trainer.ppo.pipeline.utils import calculate_pool_sizes_from_task_groups, is_ref_model_separated
+
             pool_sizes = calculate_pool_sizes_from_task_groups(sperated_node_tasks, sperated_node_ratios, total_ngpus)
-            
+
             # Extract pool sizes for each task
-            actor_pool_size = pool_sizes.get('actor-train', pool_sizes.get('actor', 0))
-            ref_pool_size = pool_sizes.get('ref_logp', pool_sizes.get('ref', 0))
-            rollout_pool_size = pool_sizes.get('generate', pool_sizes.get('rollout', 0))
+            actor_pool_size = pool_sizes.get("actor-train", pool_sizes.get("actor", 0))
+            ref_pool_size = pool_sizes.get("ref_logp", pool_sizes.get("ref", 0))
+            rollout_pool_size = pool_sizes.get("generate", pool_sizes.get("rollout", 0))
+
             def gen_pool_spec(pool_size):
                 """Generate a pool spec for the given pool size."""
                 if pool_size <= 0:
@@ -207,13 +210,15 @@ class TaskRunner:
                 nper_node = config.trainer.n_gpus_per_node
                 pool_nodes = pool_size // nper_node
                 if pool_nodes > 0 and pool_size != nper_node * pool_nodes:
-                    raise ValueError(f"Pool size {pool_size} must be a multiple of n_gpus_per_node {nper_node}. \
-                        or this setting will get poor performance.")
+                    raise ValueError(
+                        f"Pool size {pool_size} must be a multiple of n_gpus_per_node {nper_node}. \
+                        or this setting will get poor performance."
+                    )
                 return [config.trainer.n_gpus_per_node] * pool_nodes if pool_nodes > 1 else [pool_size]
 
             # Use utility function to determine if ref model is separated
             sperated_ref_model = is_ref_model_separated(sperated_node_tasks)
-            
+
             resource_pool_spec = {
                 # TODO: node size;
                 actor_pool_id: gen_pool_spec(actor_pool_size),
@@ -331,9 +336,9 @@ class TaskRunner:
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         train_sampler = create_rl_sampler(config.data, train_dataset)
-        
+
         ppo_trainer_class = RayPPOAsyncPipelineTrainer if config.trainer.get("async_pipeline", False) else RayPPOTrainer
-        if hasattr(ppo_trainer_class, '__name__'):
+        if hasattr(ppo_trainer_class, "__name__"):
             print(f"Using PPO trainer class: {ppo_trainer_class.__name__}")
         else:
             print(f"Using PPO trainer class: {ppo_trainer_class}")
@@ -355,7 +360,7 @@ class TaskRunner:
         trainer.init_workers()
         # Start the training process.
         trainer.fit()
-        print(f"Using PPO trainer fit done")
+        print("Using PPO trainer fit done")
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True):
@@ -421,7 +426,11 @@ def create_rl_sampler(data_config, dataset):
     import torch
     from torch.utils.data import RandomSampler, SequentialSampler
 
-    if hasattr(data_config, 'sampler') and data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
+    if (
+        hasattr(data_config, "sampler")
+        and data_config.sampler is not None
+        and data_config.sampler.get("class_path", None) is not None
+    ):
         curriculum_class = load_extern_type(
             data_config.sampler.class_path,
             data_config.sampler.class_name,

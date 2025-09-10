@@ -16,12 +16,11 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import hydra
-import ray
-
 import pandas as pd
-from .grpo_ray_trainer import RayGRPOTrainer
-from verl.trainer.ppo.reward import load_reward_manager
+import ray
 from torch.utils.data import Dataset
+
+from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.dataset.rl_dataset import RLHFDataset as OriginalRLHFDataset
 
 
@@ -30,11 +29,11 @@ class RLHFDataset(OriginalRLHFDataset):
         dataframes = []
         for parquet_file in self.data_files:
             # read parquet files and cache
-            if parquet_file.endswith('parquet'):
+            if parquet_file.endswith("parquet"):
                 dataframe = pd.read_parquet(parquet_file)
-            elif parquet_file.endswith('json'):
+            elif parquet_file.endswith("json"):
                 dataframe = pd.read_json(parquet_file)
-            elif parquet_file.endswith('jsonl'):
+            elif parquet_file.endswith("jsonl"):
                 chunks = []
                 for chunk in pd.read_json(
                     parquet_file,
@@ -51,22 +50,24 @@ class RLHFDataset(OriginalRLHFDataset):
 
         print(f"dataset len: {len(self.dataframe)}")
 
-        if self.config.data.get('system_prompt', None) is not None:
+        if self.config.data.get("system_prompt", None) is not None:
             system_prompt = self.config.data.system_prompt
             self.dataframe[self.prompt_key] = self.dataframe[self.prompt_key].apply(
-                lambda x: [{'role': 'system', 'content': system_prompt}]+x
+                lambda x: [{"role": "system", "content": system_prompt}] + x
             )
         # filter out too long prompts
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+                <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
             print(f"filter dataset len: {len(self.dataframe)}")
+
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
@@ -77,7 +78,14 @@ def run_grpo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "WARN",
+                    "VLLM_LOGGING_LEVEL": "WARN",
+                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
+                }
+            },
             num_cpus=config.ray_init.num_cpus,
         )
 
@@ -103,14 +111,18 @@ class TaskRunner:
         OmegaConf.resolve(config)
 
         # download the checkpoint from hdfs
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
+        )
 
         # instantiate tokenizer
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)  # used for multimodal LLM, could be none
+        processor = hf_processor(
+            local_path, trust_remote_code=trust_remote_code, use_fast=True
+        )  # used for multimodal LLM, could be none
 
         # vllm early verify
         if config.actor_rollout_ref.rollout.name in ["vllm"]:
@@ -126,7 +138,11 @@ class TaskRunner:
             from verl.single_controller.ray import RayWorkerGroup
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
@@ -134,7 +150,11 @@ class TaskRunner:
             from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
             from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = NVMegatronRayWorkerGroup
 
         else:
@@ -177,8 +197,12 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        reward_fn = load_reward_manager(
+            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+        )
+        val_reward_fn = load_reward_manager(
+            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+        )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
@@ -222,7 +246,9 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
 
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
         if not issubclass(dataset_cls, Dataset):
-            raise TypeError(f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset")
+            raise TypeError(
+                f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+            )
     else:
         dataset_cls = RLHFDataset
     print(f"Using dataset class: {dataset_cls.__name__}")

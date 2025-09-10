@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from typing import Optional
+
 BaseInferenceContext = None
 PackedSeqParams = None
 from megatron.core.transformer.attention import *

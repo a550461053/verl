@@ -50,7 +50,7 @@ from .model_initializer import (
     Qwen2MoEModel,
     Qwen3MoEModel,
     Qwen25VLModel,
-    XdgMoEModel
+    XdgMoEModel,
 )
 from .weight_converter import (
     McoreToHFWeightConverterDense,

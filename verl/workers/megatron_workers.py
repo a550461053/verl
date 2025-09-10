@@ -16,14 +16,13 @@ The main entry point to run the PPO algorithm
 """
 
 import datetime
-import asyncio
 import logging
 import os
-import ray
 import time
 from typing import Any, Optional
 
 import psutil
+import ray
 import torch
 import torch.distributed
 from codetiming import Timer
@@ -38,7 +37,7 @@ from megatron.core import parallel_state as mpu
 
 from verl import DataProto
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, Execute, register
+from verl.single_controller.base.decorator import Dispatch, Execute, make_nd_compute_dataproto_dispatch_fn, register
 from verl.single_controller.base.megatron.worker import MegatronWorker
 from verl.utils import hf_tokenizer
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -47,11 +46,11 @@ from verl.utils.device import get_device_id, get_device_name, get_nccl_backend, 
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.megatron_utils import (
-    load_megatron_model_to_gpu,
     load_megatron_model_grad_to_gpu,
+    load_megatron_model_to_gpu,
     load_megatron_optimizer,
-    offload_megatron_model_to_cpu,
     offload_megatron_model_grad_to_cpu,
+    offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
 from verl.utils.memory_utils import aggressive_empty_cache
@@ -191,12 +190,14 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self._is_ref:
                 return self.config.ref.megatron.tensor_model_parallel_size
             return 1
+
         def pp():
             if self._is_actor:
                 return self.config.actor.megatron.pipeline_model_parallel_size
             if self._is_ref:
                 return self.config.ref.megatron.pipeline_model_parallel_size
             return 1
+
         def vpp():
             _vpp = None
             if self._is_actor:
@@ -206,18 +207,21 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if type(_vpp) is str:
                 _vpp = eval(_vpp)
             return _vpp
+
         def cp():
             if self._is_actor:
                 return self.config.actor.megatron.context_parallel_size
             if self._is_ref:
                 return self.config.ref.megatron.context_parallel_size
             return 1
+
         def ep():
             if self._is_actor:
                 return self.config.actor.megatron.expert_model_parallel_size
             if self._is_ref:
                 return self.config.ref.megatron.expert_model_parallel_size
             return 1
+
         def etp():
             _etp = None
             if self._is_actor:
@@ -227,7 +231,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if type(_etp) is str:
                 _etp = eval(_etp)
             return _etp
-        
+
         def seed():
             if self._is_actor:
                 return self.config.actor.megatron.seed
@@ -342,24 +346,26 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if hasattr(self, "param_update_manager"):
             self.param_update_manager.setup_for_queue(queue)
 
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
     def check_for_ray_col(self, col_name="actor_rollout_sync"):
-        from ray.util.collective import get_rank, get_collective_group_size, is_group_initialized
+        from ray.util.collective import get_collective_group_size, get_rank, is_group_initialized
+
         ray_col_name = col_name
         ok = is_group_initialized(group_name=ray_col_name)
         rank = get_rank(group_name=ray_col_name)
         size = get_collective_group_size(group_name=ray_col_name)
         worker_id = ray.get_runtime_context().get_worker_id()
         print(f"check_for_ray_col ok: {ok}, rank: {rank}, self.rank:{self.rank}, size: {size}, worker_id: {worker_id}")
-        
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=True)
     def setup_for_ray_col(self, rank_offset, size, name, backend="nccl"):
         engine_tp_size = self.config.rollout.tensor_model_parallel_size
         # TODO: support PP/EP
         engine_nums = (size - rank_offset) // engine_tp_size
         is_engine_master = self.rank % engine_tp_size == 0
-        self.param_update_manager.setup_for_ray_col(self.rank + rank_offset, size, rank_offset, engine_nums, engine_tp_size, is_engine_master, name, backend)
+        self.param_update_manager.setup_for_ray_col(
+            self.rank + rank_offset, size, rank_offset, engine_nums, engine_tp_size, is_engine_master, name, backend
+        )
 
         return True
 
@@ -368,16 +374,14 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     ):
         from megatron.core.models.gpt.gpt_model import ModelType
 
-        from verl.utils.megatron.optimizer import get_megatron_optimizer
-        from verl.utils.megatron_utils import get_model
-        from verl.utils.model import get_generation_config, print_model_size
-
         from verl.utils.megatron.optimizer import (
             get_megatron_optimizer,
             get_megatron_optimizer_param_scheduler,
             init_megatron_optim_config,
         )
-        from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+        from verl.utils.megatron_utils import McoreModuleWrapperConfig, get_model, make_megatron_module
+        from verl.utils.model import get_generation_config, print_model_size
+
         self._init_hf_config_and_tf_config(
             model_path,
             model_path,
@@ -392,10 +396,18 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         def megatron_actor_model_provider(pre_process, post_process):
             from verl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
+            parallel_model = init_mcore_model(
+                self.tf_config,
+                self.hf_config,
+                pre_process,
+                post_process,
+                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
+                value=False,
+                freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False),
+            )
             parallel_model.cuda()
             return parallel_model
- 
+
         print(f"is actor:{self._is_actor}, is rollout: {self._is_rollout}, is ref: {self._is_ref}")
         # if self._is_actor or self._is_rollout:
         if self._is_actor or (not self._is_sperated_arch and (self._is_actor or self._is_rollout)):
@@ -432,7 +444,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
         elif self._is_actor:
-            from verl.utils.megatron_utils import start_record_memory_history, stop_record_memory_history
             # start_record_memory_history()
             actor_module = get_model(
                 megatron_actor_model_provider,
@@ -443,9 +454,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # stop_record_memory_history()
             if self.config.actor.load_weight:
                 if self.config.actor.megatron.use_dist_checkpointing:
-                    load_mcore_dist_weights(actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False)
+                    load_mcore_dist_weights(
+                        actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False
+                    )
                 else:
-                    load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
+                    load_megatron_gptmodel_weights(
+                        self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False
+                    )
 
             if self.rank == 0:
                 print_model_size(actor_module[0])
@@ -503,9 +518,10 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
     def _build_param_update_manager(self):
         from verl.workers.param_update.param_update import ParamUpdateManager
+
         if self._is_actor or self._is_rollout:
             # we only need param update manager for actor and rollout
-            
+
             # TODO: copy from _build_rollout
             layer_name_mapping = {
                 "qkv_layer_name": "self_attention.linear_qkv.",
@@ -516,7 +532,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
             weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
 
-            actor_module=self.actor.actor_module if self._is_actor else None
+            actor_module = self.actor.actor_module if self._is_actor else None
 
             param_update_manager = ParamUpdateManager(
                 model_params=actor_module,
@@ -528,25 +544,26 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 param_update_preduce_bucket_size_mb=self.config.rollout.get("param_update_preduce_bucket_size_mb", 512),
                 enable_param_async=self.config.rollout.get("enable_param_async", False),
             )
-            
+
             # Register actor clusters (if configured)
-            if hasattr(self.config, 'actor_clusters'):
-                train_ranks = self.config.actor_clusters.get('train_ranks', [])
-                generate_ranks = self.config.actor_clusters.get('generate_ranks', [])
-                world_size = self.config.actor_clusters.get('world_size', self.world_size)
-                
+            if hasattr(self.config, "actor_clusters"):
+                train_ranks = self.config.actor_clusters.get("train_ranks", [])
+                generate_ranks = self.config.actor_clusters.get("generate_ranks", [])
+                world_size = self.config.actor_clusters.get("world_size", self.world_size)
+
                 if train_ranks and generate_ranks:
                     param_update_manager.register_actor_clusters(train_ranks, generate_ranks, world_size)
-                    print(f"Registered actor clusters: train_ranks={train_ranks}, generate_ranks={generate_ranks}, world_size={world_size}")
+                    print(
+                        f"Registered actor clusters: train_ranks={train_ranks}, generate_ranks={generate_ranks}, world_size={world_size}"
+                    )
         else:
             # ref does not need param update manager
             param_update_manager = None
         return param_update_manager
-        
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
-        
+
         layer_name_mapping = {
             "qkv_layer_name": "self_attention.linear_qkv.",
             "gate_proj_layer_name": "linear_fc1.",
@@ -620,7 +637,10 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and we import it
             # here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-            from verl.workers.sharding_manager.megatron_sglang import MegatronSGLangShardingManager, MegatronSGLangAsyncShardingManager
+            from verl.workers.sharding_manager.megatron_sglang import (
+                MegatronSGLangAsyncShardingManager,
+                MegatronSGLangShardingManager,
+            )
 
             infer_tp = self.config.rollout.tensor_model_parallel_size
             dp = self.world_size // infer_tp
@@ -652,7 +672,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             from verl.models.mcore import get_mcore_weight_converter
 
             weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
-            sharding_manager_cls = MegatronSGLangAsyncShardingManager if self._is_sperated_arch else MegatronSGLangShardingManager
+            sharding_manager_cls = (
+                MegatronSGLangAsyncShardingManager if self._is_sperated_arch else MegatronSGLangShardingManager
+            )
             sharding_manager = sharding_manager_cls(
                 actor_module=self.actor.actor_module if self._is_actor else None,
                 inference_engine=rollout._engine,
@@ -669,7 +691,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         else:
             raise NotImplementedError("Only vllmRollout is supported with Megatron now")
         return rollout, sharding_manager
-
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -752,7 +773,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # used for sleep/wake_up
             self.rollout.sharding_manager = self.sharding_manager
             # Also set sharding_manager to engine if it's DualBufferAsyncEngine
-            if hasattr(self.rollout._engine, 'sharding_manager'):
+            if hasattr(self.rollout._engine, "sharding_manager"):
                 self.rollout._engine.sharding_manager = self.sharding_manager
             log_gpu_memory_usage("After rollout init", logger=logger)
 
@@ -807,7 +828,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @DistProfiler.annotate(color="red")
     def update_actor(self, data: DataProto):
         assert self._is_actor
-        import time
         if self._is_offload_param:
             log_gpu_memory_usage("Before load actor params and grad during update_actor", logger=logger)
             load_megatron_model_to_gpu(self.actor_module)
@@ -858,7 +878,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=True)
         return output
 
-    
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.ALL, blocking=False)
     @GPUMemoryLogger(role="sync_per_tensor_generator", logger=logger)
     def sync_per_tensor_generator(self):
@@ -908,7 +927,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self._is_rollout or self._is_actor
         params_meta = self.param_update_manager.get_params_meta()
         return params_meta
-        
+
     @register(dispatch_mode=Dispatch.ALL_TO_ALL)
     @GPUMemoryLogger(role="set_params_meta", logger=logger)
     def set_params_meta(self, params_meta):
@@ -972,13 +991,16 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         assert self._is_rollout
         prompts.batch = prompts.batch.cuda()
         meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
 
         with self.sharding_manager:
-
             # (zhangchi.usc1992) wake up kv cache here. Currently only support vllm.
             # Will support sglang once separate wakeup of model weights and kv cache is supported
             # This API should be exposed by the rollout. Will rewrite this part when we refactor after v0.4 release.
@@ -1007,7 +1029,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         """
         # loop = asyncio.get_event_loop()
         # return loop.run_until_complete(self.generate_sequences(prompts))
-        
+
         async def _async_generate(input_queue, output_queue):
             prompts = input_queue.get()
             # print(f"async_generate_sequences before get prompts from input_queue:{input_queue.qsize()}")
@@ -1015,6 +1037,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             # print(f"async_generate_sequences after get prompts from input_queue:{input_queue.qsize()}")
             output_queue.put(output)
             # print(f"async_generate_sequences after put output to output_queue:{output_queue.qsize()}")
+
         # asyncio.run(_async_generate(input_queue, output_queue))
         await _async_generate(input_queue, output_queue)
 

@@ -385,8 +385,11 @@ def hf_to_mcore_config_llama4(
     raise NotImplementedError("Llama4ForConditionalGeneration is not supported yet")
 
 
-def hf_to_mcore_config_xdgmoe(hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs) -> TransformerConfig:
+def hf_to_mcore_config_xdgmoe(
+    hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
+) -> TransformerConfig:
     from cybertron.models.deepseek_v2.configure_deepseekv2 import DeepseekV2TransformerConfig
+
     args = _get_base_transformer_config(
         hf_config=hf_config,
         dtype=dtype,

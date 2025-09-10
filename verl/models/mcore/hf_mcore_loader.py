@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 
 class HfMcoreManager:
-
     def __init__(self):
         self.QKV_FUSE_NAME = ".linear_qkv."
         self.GATE_UP_FUSE_NAME = ".linear_fc1."
@@ -48,7 +47,7 @@ class HfMcoreManager:
             "lm_head": (True, 0),
             "embed_tokens": (True, 0),
             "gate_proj": (True, 0),
-            "up_proj": (True, 0)
+            "up_proj": (True, 0),
         }
 
     def is_qkv_fusion(self, layer_name):
@@ -144,20 +143,21 @@ class DeepseekV2HfLoader(HfMcoreManager):
         self._hidden_size = self.model_config.hidden_size
         self._ffn_hidden_size = self.model_config.intermediate_size
         self._qk_layernorm = self.model_config.qk_layernorm
-        
+
         self._padded_vocab_size = self.model_config.vocab_size
         self._num_experts = self.model_config.n_routed_experts
         self._moe_ffn_hidden_size = self.model_config.moe_intermediate_size
-        self._moe_shared_expert_intermediate_size = self.model_config.n_shared_experts * self.model_config.moe_intermediate_size
-        
+        self._moe_shared_expert_intermediate_size = (
+            self.model_config.n_shared_experts * self.model_config.moe_intermediate_size
+        )
+
         self._kv_channel = int(self._hidden_size / self._head_num)
-        
+
         self._first_pipeline_num_layers = getattr(config.actor.megatron, "first_pipeline_num_layers", None)
         self._last_pipeline_num_layers = getattr(config.actor.megatron, "last_pipeline_num_layers", None)
-        
+
         self._multi_latent_attention = getattr(self.model_config, "multi_latent_attention", False)
-        
-        
+
         self._fuse_up_gate = True
         self._moe_grouped_gemm = True
 
@@ -177,15 +177,12 @@ class DeepseekV2HfLoader(HfMcoreManager):
         # 当模型为qwen系列时，修改映射表。
         if "Qwen" in self.hf_architecture:
             # 修改attention之后的norm的映射，替换为了qwen的名字
-            self.REPLACE_DICT["post_attention_layernorm.weight"] = (
-                "mlp.linear_fc1.layer_norm_weight"
-            )
+            self.REPLACE_DICT["post_attention_layernorm.weight"] = "mlp.linear_fc1.layer_norm_weight"
             # 去掉旧的映射
             self.REPLACE_DICT.pop("post_attention_layernorm.")
 
         if not self._moe_grouped_gemm:
             self.REPLACE_DICT[".experts."] = ".experts.local_experts."
-
 
     def get_global_idx(self, layer_name, pp_offset, ep_offset):
         layer_name = self.get_global_layer_idx(layer_name, pp_offset)
@@ -210,9 +207,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         return torch.split(t, split_size, dim=dim)[self._tp_rank].contiguous()
 
     def _load_layer_tensor(self, layer_name):
-        assert (
-            layer_name in self._layer_to_params
-        ), f"{layer_name} not in {self._layer_to_params.keys()}"
+        assert layer_name in self._layer_to_params, f"{layer_name} not in {self._layer_to_params.keys()}"
         hf_layer_names = self._layer_to_params[layer_name]
         file_to_layers = defaultdict(set)
         tensors = {}
@@ -237,7 +232,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         k_groups = torch.split(k, self._kv_channel, dim=0)
         v_groups = torch.split(v, self._kv_channel, dim=0)
         fused_groups = [
-            torch.cat([qg, kg, vg], dim=0) for qg, kg, vg in zip(q_groups, k_groups, v_groups)
+            torch.cat([qg, kg, vg], dim=0) for qg, kg, vg in zip(q_groups, k_groups, v_groups, strict=False)
         ]
         fused = torch.cat(fused_groups, dim=0)
         fused = self._slice_mp(fused, 0)
@@ -262,9 +257,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         if vocab_size >= self._padded_vocab_size:
             embedding = embedding[: self._padded_vocab_size, :]
         else:
-            assert (
-                False
-            ), f"ckpt.vocab_size={vocab_size}, padded_vocab_size={self._padded_vocab_size}"
+            assert False, f"ckpt.vocab_size={vocab_size}, padded_vocab_size={self._padded_vocab_size}"
         tensors[hf_name] = embedding
         return tensors
 
@@ -281,13 +274,9 @@ class DeepseekV2HfLoader(HfMcoreManager):
                 self._first_pipeline_num_layers,
                 self._last_pipeline_num_layers,
             )
-            middle_num_stages = pp_size - sum(
-                [1 if x is not None else 0 for x in first_last_layers]
-            )
+            middle_num_stages = pp_size - sum([1 if x is not None else 0 for x in first_last_layers])
 
-            middle_num_layers = self._num_layers - sum(
-                [x if x is not None else 0 for x in first_last_layers]
-            )
+            middle_num_layers = self._num_layers - sum([x if x is not None else 0 for x in first_last_layers])
             middle_per_stage = middle_num_layers // middle_num_stages
 
             if self._first_pipeline_num_layers is None:
@@ -324,11 +313,10 @@ class DeepseekV2HfLoader(HfMcoreManager):
         # split and fuse
         tensor_names = list(state_dict.keys())
         for hf_layer_name in tensor_names:
-            
             if ".k_proj." in hf_layer_name or ".v_proj." in hf_layer_name or ".gate_proj." in hf_layer_name:
                 # skip k_proj, v_proj, gate_proj
                 continue
-            
+
             tensor = state_dict[hf_layer_name]
             is_split, split_dim = self.get_split_mode(hf_layer_name)
 
@@ -342,9 +330,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
             #     tensors_adjusted[hf_layer_name] = tensor.contiguous()
 
             # qkv fuse
-            if not self._multi_latent_attention and self.is_qkv_fusion(
-                hf_layer_name
-            ):  # only query true
+            if not self._multi_latent_attention and self.is_qkv_fusion(hf_layer_name):  # only query true
                 k_name = hf_layer_name.replace(self.Q_NAME, ".k_proj.")
                 v_name = hf_layer_name.replace(self.Q_NAME, ".v_proj.")
                 qkv_fused = self._handle_qkv(
@@ -357,13 +343,9 @@ class DeepseekV2HfLoader(HfMcoreManager):
             elif self.UP_NAME in hf_layer_name:  # only up true
                 gate_name = hf_layer_name.replace(self.UP_NAME, ".gate_proj.")
                 _ffn_hidden_size = (
-                    self._moe_ffn_hidden_size
-                    if "share" not in gate_name
-                    else self._moe_shared_expert_intermediate_size
+                    self._moe_ffn_hidden_size if "share" not in gate_name else self._moe_shared_expert_intermediate_size
                 )
-                _ffn_hidden_size = (
-                    self._ffn_hidden_size if "expert" not in gate_name else _ffn_hidden_size
-                )
+                _ffn_hidden_size = self._ffn_hidden_size if "expert" not in gate_name else _ffn_hidden_size
                 gate_up_proj = self._handle_fuse_up_gate(
                     state_dict.pop(gate_name),
                     state_dict.pop(hf_layer_name),
@@ -390,7 +372,7 @@ class DeepseekV2HfLoader(HfMcoreManager):
         # 层号调整
         mg_name = re.sub(
             r"(decoder\.layers\.)(\d+)(\..*)",
-            lambda m: f"{m.group(1)}{int(m.group(2))-self.begin}{m.group(3)}",
+            lambda m: f"{m.group(1)}{int(m.group(2)) - self.begin}{m.group(3)}",
             mg_name,
         )
         # Grouped GEMM特殊处理
@@ -409,7 +391,6 @@ class DeepseekV2HfLoader(HfMcoreManager):
             mg_layer_name = self.convert_layer_name(layer_name)
             tensor = state_dict.pop(layer_name)
             state_dict[mg_layer_name] = tensor
-            
 
         return state_dict
 
@@ -445,5 +426,3 @@ class DeepseekV2HfLoader(HfMcoreManager):
         self.calculate_begin_and_end(self._pp_rank)
         state_dict = self.load_all_tensors()
         return self.refactor_tensors(state_dict)
-
-

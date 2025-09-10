@@ -206,7 +206,9 @@ def compute_grpo_passk_outcome_advantage(
         for idx in id2scores:
             rewards = torch.stack(id2scores[idx])  # (k,)
             if rewards.numel() < 2:
-                raise ValueError(f"Pass@k requires at least 2 samples per group. Got {rewards.numel()} for group {idx}.")
+                raise ValueError(
+                    f"Pass@k requires at least 2 samples per group. Got {rewards.numel()} for group {idx}."
+                )
             topk, topk_idx = torch.topk(rewards, 2)
             r_max, r_second_max = topk[0], topk[1]
             i_max = id2indices[idx][topk_idx[0].item()]
@@ -220,7 +222,9 @@ def compute_grpo_passk_outcome_advantage(
     return advantages, advantages
 
 
-def compute_reinforce_plus_plus_baseline_outcome_advantage(token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, epsilon: float = 1e-6):
+def compute_reinforce_plus_plus_baseline_outcome_advantage(
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, epsilon: float = 1e-6
+):
     """
     Compute advantage for RF++-baseline (https://arxiv.org/abs/2501.03262), operating only on Outcome reward
     (with only one scalar reward for each response).
@@ -263,7 +267,9 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(token_level_rewards: 
     return scores, scores
 
 
-def compute_rloo_outcome_advantage(token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, epsilon: float = 1e-6):
+def compute_rloo_outcome_advantage(
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, epsilon: float = 1e-6
+):
     """
     Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
 
@@ -298,13 +304,17 @@ def compute_rloo_outcome_advantage(token_level_rewards: torch.Tensor, response_m
         for i in range(bsz):
             response_num = len(id2score[index[i]])
             if response_num > 1:
-                scores[i] = scores[i] * response_num / (response_num - 1) - id2mean[index[i]] * response_num / (response_num - 1)
+                scores[i] = scores[i] * response_num / (response_num - 1) - id2mean[index[i]] * response_num / (
+                    response_num - 1
+                )
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
 
 
-def compute_opo_outcome_advantage(token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, epsilon: float = 1e-6):
+def compute_opo_outcome_advantage(
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, epsilon: float = 1e-6
+):
     """
     Compute advantage for OPO based on https://arxiv.org/pdf/2505.23585
 
@@ -349,7 +359,9 @@ def compute_opo_outcome_advantage(token_level_rewards: torch.Tensor, response_ma
     return scores, scores
 
 
-def compute_reinforce_plus_plus_outcome_advantage(token_level_rewards: torch.Tensor, response_mask: torch.Tensor, gamma: torch.Tensor):
+def compute_reinforce_plus_plus_outcome_advantage(
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, gamma: torch.Tensor
+):
     """
     Compute advantage for REINFORCE++.
     This implementation is based on the paper: https://arxiv.org/abs/2501.03262
@@ -383,7 +395,9 @@ def compute_reinforce_plus_plus_outcome_advantage(token_level_rewards: torch.Ten
     return advantages, returns
 
 
-def compute_remax_outcome_advantage(token_level_rewards: torch.Tensor, reward_baselines: torch.Tensor, response_mask: torch.Tensor):
+def compute_remax_outcome_advantage(
+    token_level_rewards: torch.Tensor, reward_baselines: torch.Tensor, response_mask: torch.Tensor
+):
     """
     Compute advantage for ReMax, operating only on Outcome reward
     This implementation is based on the paper: https://arxiv.org/abs/2310.10505
@@ -491,7 +505,10 @@ def compute_policy_loss(
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
     """
-    assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
+    assert clip_ratio_c > 1.0, (
+        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
+        + f" but get the value: {clip_ratio_c}."
+    )
 
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
@@ -502,13 +519,19 @@ def compute_policy_loss(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
-    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
-    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+    pg_losses2 = -advantages * torch.clamp(
+        ratio, 1 - cliprange_low, 1 + cliprange_high
+    )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+    clip_pg_losses1 = torch.maximum(
+        pg_losses1, pg_losses2
+    )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
     pg_losses3 = -advantages * clip_ratio_c
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-    pg_clipfrac_lower = verl_F.masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean(
+        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
+    )
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
@@ -533,7 +556,14 @@ def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean
     return entropy_loss
 
 
-def compute_value_loss(vpreds: torch.Tensor, returns: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor, cliprange_value: float, loss_agg_mode: str = "token-mean"):
+def compute_value_loss(
+    vpreds: torch.Tensor,
+    returns: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    cliprange_value: float,
+    loss_agg_mode: str = "token-mean",
+):
     """
     Compute the clipped value-function loss for PPO.
 

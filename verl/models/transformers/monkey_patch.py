@@ -299,7 +299,7 @@ def apply_monkey_patch(
         return
     elif model.config.model_type == "xdgmoe":
         module = sys.modules[model.__class__.__module__]
-        real_cls = getattr(module, "XdgMoEFlashAttention2")
+        real_cls = module.XdgMoEFlashAttention2
 
         if use_remove_padding or ulysses_sp_size > 1:
             from verl.models.transformers.xdgmoe import ulysses_flash_attn_forward
@@ -309,11 +309,11 @@ def apply_monkey_patch(
 
         if use_fused_kernels:
             # TODO
-            pass 
+            pass
             # from verl.models.transformers.qwen2_vl import forward_for_ppo
             # XdgMoEForCausalLM.forward = forward_for_ppo
 
-        return 
+        return
     # transformers<=4.47.1
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):

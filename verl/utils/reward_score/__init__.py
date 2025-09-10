@@ -101,15 +101,16 @@ def default_compute_score(
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
-    elif data_source in ['ifeval', 'ifeval_benchmark', 'ifeval_like_3w_v1', 'Nemotron-IFEVAL']:
+    elif data_source in ["ifeval", "ifeval_benchmark", "ifeval_like_3w_v1", "Nemotron-IFEVAL"]:
         # from .ifeavl import compute_score
         from .ifeval_online import compute_score
 
         res = compute_score(solution_str, ground_truth)
-    elif data_source in ['deepscaler']:
+    elif data_source in ["deepscaler"]:
         from .math_verify import compute_score
+
         res = compute_score(solution_str, ground_truth, timeout_score=2)
-        
+
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 

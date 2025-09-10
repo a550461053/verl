@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 
 import multiprocessing as mp
+
 from sglang.srt.entrypoints.engine import mp as sglang_mp
+
 from .sglang_rollout import SGLangRollout
 
 
@@ -25,9 +27,12 @@ class PatchedProcess(mp.Process):
         super().run()
 
     def registe_dots_model(self):
-        from verl.models.dots.sglang import XdgMoEForCausalLM
         from sglang.srt.models.registry import ModelRegistry
+
+        from verl.models.dots.sglang import XdgMoEForCausalLM
+
         ModelRegistry.models["XdgMoEForCausalLM"] = XdgMoEForCausalLM
+
 
 sglang_mp.Process = PatchedProcess
 
