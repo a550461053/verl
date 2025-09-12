@@ -4,7 +4,7 @@
 
 This project introduces a **groundbreaking asynchronous reinforcement learning pipeline** that fundamentally transforms RL training efficiency by completely decoupling traditional synchronous bottlenecks.
 
-📖 **📚 Technical Details**: For comprehensive technical implementation details and design rationale, see our detailed analysis: [**基于状态机的Async-RL(性能提升50%+)**](https://zhuanlan.zhihu.com/p/1941960688944805854)
+**📚 Technical Details**: For comprehensive technical implementation details and design rationale, see our detailed analysis: [**基于状态机的Async-RL(性能提升50%+)**](https://zhuanlan.zhihu.com/p/1941960688944805854)
 
 ### 1. Fully Decoupled Architecture
 
@@ -64,6 +64,10 @@ The system implements sophisticated off-policy training with asynchronous execut
 | **async-rl** | x | 270s | 170s | 140s | 120s |
 | **speedup** | x | **85%** | **50%** | **85%** | **125%** |
 
+- async-rl overlapped performance
+**Update**: 512nGPUs + 340B-moe, async-rl use nccl-sync-overlap can speedup 50% then verl-hybrid-engine.
+
+![async-rl overlap timeline](docs/async-rl/async-rl-performance-timeline.jpg)
 
 ## Architecture Overview
 
@@ -117,7 +121,7 @@ The Async-RL pipeline implements a sophisticated state machine design with inter
 - **Orange**: Ref-LogP computations
 - **Light Green**: Generate operations
 - **Light Red**: Param-Update processes
-- **White**: Core pipeline components (dataloader, reward, rollout)
+- **White**: Other pipeline components (dataloader, reward, rollout)
 
 ### 📋 Training Logs - State Machine Execution
 Real-time logs demonstrating the asynchronous execution of different state machines:
@@ -144,10 +148,12 @@ Real-time logs demonstrating the asynchronous execution of different state machi
 **Performance Tuning:**
 ```bash
 +actor_rollout_ref.async_pipeline=True \
-# Performance Tuning, enable async-param-update
+# Performance Tuning, enable async-param-update(always True)
 +actor_rollout_ref.rollout.enable_dual_buffer=True \
+# support: async-cpu or sync-nccl
++actor_rollout_ref.rollout.enable_param_async=False \
 # The sender granularity of the actor training node during parameter update
-+actor_rollout_ref.rollout.param_update_preduce_bucket_size_mb=512 \
++actor_rollout_ref.rollout.param_update_preduce_bucket_size_mb=2048 \
 # The receiver granularity of the rollout inference node is too large, which will cause GPU-OOM
 +actor_rollout_ref.rollout.param_update_consume_bucket_size_mb=128 \
 
@@ -178,10 +184,11 @@ await flow.run()
 
 ## Upcoming Features
 
-- **Validation Asynchronous Support**: Parallel data streams for training and validation
-- **Critic Asynchronous Support**: Full critic component asynchrony
-- **Off-Policy Monitoring**: Track param_update lag behind actor train-step
-- **Multi-turn rollout and tools**: Advanced optimizations for complex scenarios
+- [x] **Validation Asynchronous Support**: Parallel data streams for training and validation
+- [ ] **Critic Asynchronous Support**: Full critic component asynchrony
+- [ ] **Off-Policy Monitoring**: Track param_update lag behind actor train-step
+- [ ] **Multi-turn rollout and tools**: Advanced optimizations for complex scenarios
+- [ ] **Resharding weight for sglang load**: Optimize param-sync's overhead
 
 
 ---
